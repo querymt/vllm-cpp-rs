@@ -233,10 +233,9 @@ fn sanitizer_config(bundled: bool) -> Option<String> {
         panic!("VLLM_CPP_SANITIZE is supported only for bundled builds");
     }
     match value.as_str() {
-        "address" | "undefined" | "address,undefined" => Some(value),
-        "thread" => panic!("thread sanitization is not part of the blocking API test lane"),
+        "address" | "undefined" | "address,undefined" | "thread" => Some(value),
         _ => panic!(
-            "unsupported VLLM_CPP_SANITIZE value `{value}`; expected OFF, address, undefined, or address,undefined"
+            "unsupported VLLM_CPP_SANITIZE value `{value}`; expected OFF, address, undefined, address,undefined, or thread"
         ),
     }
 }
@@ -250,6 +249,9 @@ fn link_sanitizer_runtimes(sanitizer: Option<&str>) {
     }
     if sanitizer.split(',').any(|name| name == "undefined") {
         println!("cargo:rustc-link-lib=dylib=ubsan");
+    }
+    if sanitizer.split(',').any(|name| name == "thread") {
+        println!("cargo:rustc-link-lib=dylib=tsan");
     }
 }
 

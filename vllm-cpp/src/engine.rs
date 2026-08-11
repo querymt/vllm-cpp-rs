@@ -3,6 +3,7 @@ use std::mem::MaybeUninit;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
+use std::sync::Arc;
 
 use vllm_cpp_sys as ffi;
 
@@ -12,16 +13,21 @@ use crate::callback::{
 use crate::error::{invalid_configuration, status_result, Error};
 use crate::params::{SamplingParams, SchedulerPolicy, Toggle};
 
-/// An owned vllm.cpp serving engine.
+/// A cloneable vllm.cpp serving engine.
+#[derive(Clone)]
 pub struct Engine {
-    raw: NonNull<ffi::vllm_engine>,
+    pub(crate) inner: Arc<EngineInner>,
+}
+
+pub(crate) struct EngineInner {
+    pub(crate) raw: NonNull<ffi::vllm_engine>,
 }
 
 impl std::fmt::Debug for Engine {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Engine")
-            .field("raw", &self.raw)
+            .field("raw", &self.inner.raw)
             .finish_non_exhaustive()
     }
 }
@@ -87,7 +93,7 @@ impl Engine {
         // call, and out storage is initialized by native code on success.
         let status = unsafe {
             ffi::vllm_complete(
-                self.raw.as_ptr(),
+                self.inner.raw.as_ptr(),
                 prompt.as_ptr(),
                 params.raw(),
                 raw.as_mut_ptr(),
@@ -120,7 +126,7 @@ impl Engine {
         // API does not retain user_data after returning.
         let status = unsafe {
             ffi::vllm_complete_stream(
-                self.raw.as_ptr(),
+                self.inner.raw.as_ptr(),
                 prompt.as_ptr(),
                 params.raw(),
                 Some(callback_trampoline::<F>),
@@ -145,7 +151,8 @@ impl Engine {
         let mut output: *mut c_char = ptr::null_mut();
         // SAFETY: the engine and request pointers are valid for the call and the
         // returned string is released by NativeStringGuard.
-        let status = unsafe { ffi::vllm_chat(self.raw.as_ptr(), request.as_ptr(), &mut output) };
+        let status =
+            unsafe { ffi::vllm_chat(self.inner.raw.as_ptr(), request.as_ptr(), &mut output) };
         status_result(status)?;
         let output = NonNull::new(output).ok_or_else(|| Error::Runtime {
             message: "vllm_chat succeeded without a response".to_owned(),
@@ -169,7 +176,7 @@ impl Engine {
         // not retain it after returning.
         let status = unsafe {
             ffi::vllm_chat_stream(
-                self.raw.as_ptr(),
+                self.inner.raw.as_ptr(),
                 request.as_ptr(),
                 Some(callback_trampoline::<F>),
                 ptr::from_mut(&mut state).cast(),
@@ -201,16 +208,20 @@ impl Engine {
     }
 }
 
-impl Drop for Engine {
+impl Drop for EngineInner {
     fn drop(&mut self) {
-        // SAFETY: Engine exclusively owns this live handle and drops it once.
+        // SAFETY: EngineInner exclusively owns this live handle and drops it once,
+        // after every Request-owned Arc has been released.
         unsafe { ffi::vllm_engine_free(self.raw.as_ptr()) };
     }
 }
 
-// Moving the sole owner is safe because the native handle has no thread affinity;
-// ownership still keeps the handle live until all Rust access has ended.
-unsafe impl Send for Engine {}
+// SAFETY: vllm.cpp documents concurrent completion submissions as thread-safe,
+// and EngineInner keeps the engine alive until the last shared owner is dropped.
+unsafe impl Send for EngineInner {}
+// SAFETY: shared references may submit concurrently through native AsyncLLM;
+// destruction cannot race because Arc retains the handle for each active owner.
+unsafe impl Sync for EngineInner {}
 
 impl EngineBuilder {
     #[must_use]
@@ -358,7 +369,9 @@ impl EngineBuilder {
         let raw = NonNull::new(output).ok_or_else(|| Error::ModelLoad {
             message: "vllm_engine_load succeeded without a handle".to_owned(),
         })?;
-        Ok(Engine { raw })
+        Ok(Engine {
+            inner: Arc::new(EngineInner { raw }),
+        })
     }
 }
 
