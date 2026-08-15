@@ -9,7 +9,7 @@ Rust bindings for [vllm.cpp](https://github.com/mudler/vllm.cpp), organized as:
 
 The safe crate provides a cloneable engine API for model loading, blocking completion and streaming, non-blocking concurrent requests, structured output, and raw-JSON chat. An optional `serde` feature adds `serde_json::Value` chat helpers. The sys crate provides checked-in generated FFI declarations with C/Rust layout checks and coverage for all 19 exported C symbols.
 
-Linux x86_64 CPU builds support bundled static, bundled dynamic, system static, and system dynamic linking. vllm.cpp is pinned at `34aedfbe8ed9779697905541a62e2160ccfd9c05`, which exposes C ABI version 10.
+Linux x86_64 CPU builds support bundled static, bundled dynamic, system static, and system dynamic linking. Experimental bundled builds also expose Linux x86_64/aarch64 build configuration for CUDA, external CUTLASS, Triton AOT, and Vulkan. These accelerator features are build-only integration surfaces, not runtime-support claims. vllm.cpp is pinned at `34aedfbe8ed9779697905541a62e2160ccfd9c05`, which exposes C ABI version 10.
 
 ## Prerequisites
 
@@ -22,10 +22,12 @@ Initial development and testing support Linux CPU builds. They require:
 - A system linker and C++ standard library.
 - Just 1.40 or newer for maintainer workflows, plus Git, `jq`, GNU tar, and `curl` for the model fixture recipe.
 
-This repository provides a Nix development shell with the pinned development tools:
+This repository provides a Nix development shell with the pinned development tools. Linux also has minimal CUDA and Vulkan shells:
 
 ```console
 nix develop
+nix develop .#cuda
+nix develop .#vulkan
 ```
 
 ## Checkout
@@ -60,15 +62,7 @@ println!("{:?}", request.wait()?);
 
 All streaming callbacks receive copied UTF-8 deltas. Blocking callbacks may borrow stack data; their panics are caught before the C boundary and resumed only after the native call returns. Asynchronous callbacks must be `Send + 'static`, run on a native delivery thread, and report panic as `Error::CallbackPanicked` from `wait`. Waiting for or freeing a request from its own callback thread is prohibited by ABI v10: `wait` returns `Error::RequestCallbackThread`, while drop transfers cleanup to a prestarted reaper that owns the request, callback, and engine until native free/cancel/join completes. Chat methods accept raw OpenAI-compatible request JSON; enable `serde` for `serde_json::Value` request and response helpers.
 
-Run the practical examples with a model directory:
-
-```console
-cargo run -p vllm-cpp --example complete -- <model-directory>
-cargo run -p vllm-cpp --example stream -- <model-directory>
-cargo run -p vllm-cpp --example concurrent -- <model-directory>
-cargo run -p vllm-cpp --example chat -- <model-directory>
-cargo run -p vllm-cpp --example structured -- <model-directory>
-```
+See [the examples guide](vllm-cpp/examples/README.md) for ordinary Linux and optional Nix setup and commands for every example.
 
 ## Build and Test
 
@@ -81,9 +75,37 @@ cargo test --locked -p vllm-cpp --release --features serde
 just ci
 ```
 
-Set `CMAKE_BUILD_PARALLEL_LEVEL` to control native parallelism. The bundled build is deterministic and CPU-only: native tests, examples, the HTTP server, CUDA, Metal, MLX, Vulkan, Triton, and CUTLASS fetching are disabled explicitly.
+Set `CMAKE_BUILD_PARALLEL_LEVEL` to control native parallelism. The default bundled build remains deterministic and CPU-only: native tests, examples, the HTTP server, CUDA, Metal, MLX, Vulkan, Triton, and CUTLASS fetching are disabled explicitly.
 
 `build.rs` is consumer-only native build/link integration; it does not download dependencies or compile/execute the maintainer layout probe. Ordinary consumers do not need Just, bindgen, or libclang. Normal first-time Cargo dependency resolution may access crates.io; use Cargo's standard `--offline` mode after dependencies are cached.
+
+## Experimental Backend Builds
+
+Backend features apply to bundled Linux x86_64/aarch64 builds only and are mutually exclusive with `system`; CUDA and Vulkan are also mutually exclusive. Backend features do not enable `bundled`: normal default-feature commands may use `--features cuda`, while `--no-default-features` callers must include it explicitly, for example `--features bundled,cuda`. Use a fresh `CARGO_TARGET_DIR` for every backend and link mode.
+
+- `cuda` requires `VLLM_CPP_CUDA_ARCHITECTURES` equal to `80`, `86`, `87`, `89`, `90a`, `100a`, `103a`, `110`, `120a`, `121a`, or `120a;121a`. Leave this variable unset when `cuda` is disabled, including CPU and system builds.
+- `cuda-cutlass` implies `cuda`, requires an explicit canonical `VLLM_CPP_CUTLASS_DIR` containing CUTLASS >=4.5.0, disables fetching, and rejects `103a` and `110`. Plain CUDA uses a nonexistent sentinel CUTLASS root so an ambient checkout cannot alter the build.
+- `triton-aot` implies `cuda`, enables only checked-in AOT artifacts for one of `80`, `86`, `89`, `90a`, `100a`, or `121a`, and forces regeneration off.
+- `vulkan` uses packaged Khronos headers and checked-in SPIR-V. It does not link a Vulkan SDK library; the native library opens the runtime loader dynamically.
+
+For example:
+
+```console
+nix develop .#cuda
+VLLM_CPP_CUDA_ARCHITECTURES=120a \
+  CARGO_TARGET_DIR=target/cuda-static \
+  cargo build --locked --release --features cuda
+VLLM_CPP_CUDA_ARCHITECTURES=120a \
+  CARGO_TARGET_DIR=target/cuda-dynamic \
+  cargo build --locked --release --features cuda,dynamic-link
+
+nix develop .#vulkan
+CARGO_TARGET_DIR=target/vulkan-static cargo build --locked --release --features vulkan
+```
+
+Static CUDA links the exact `cudart`, `cublasLt`, and, for Triton, CUDA driver locations selected by CMake. Dynamic builds rely on `libvllm.so` `DT_NEEDED` entries instead of repeating those transitive Cargo links; deploy the shared library and toolkit libraries through normal loader paths.
+
+Compilation does not establish runtime correctness. Known native evidence blockers remain: CUDA teardown can SIGSEGV after otherwise successful tests; CUDA bf16 testing has a numerical tolerance failure; CUTLASS concurrent output differs from the non-concurrent path; Vulkan runtime coverage is incomplete. No runtime support is claimed here.
 
 ## Test Model and Sanitizers
 
@@ -129,7 +151,7 @@ The package gate preserves the sys crate inventory, tests the extracted sys crat
 
 ## Support
 
-The supported target is native Linux x86_64 CPU. Maintainer tests cover the four bundled/system static/dynamic link modes plus bundled blocking and concurrent request inference with the pinned Qwen fixture. Sanitizer evidence covers native ASan/UBSan/leak detection and selected native-only GCC TSan lifecycle paths as described above. Other operating systems, architectures, and accelerator builds are not supported by this Rust build.
+The supported runtime target is native Linux x86_64 CPU. Maintainer tests cover the four bundled/system static/dynamic CPU link modes plus bundled blocking and concurrent request inference with the pinned Qwen fixture. Sanitizer evidence covers native ASan/UBSan/leak detection and selected native-only GCC TSan lifecycle paths as described above. Linux CUDA/CUTLASS/Triton/Vulkan features remain experimental build-only surfaces with the limitations listed above; Apple and other accelerator targets are out of scope.
 
 ## Licensing and Affiliation
 

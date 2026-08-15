@@ -19,13 +19,17 @@ include = [
     "/LICENSE-MIT",
     "/NOTICE",
     "/THIRD_PARTY.md",
+    "/licenses/**",
     "/vllm.cpp/CMakeLists.txt",
     "/vllm.cpp/cmake/**",
     "/vllm.cpp/include/**",
     "/vllm.cpp/src/**",
+    "/vllm.cpp/triton_kernels/**",
+    "/vllm.cpp/scripts/triton-aot-compile.py",
     "/vllm.cpp/third_party/blake3/**",
     "/vllm.cpp/third_party/minja/**",
     "/vllm.cpp/third_party/nlohmann/**",
+    "/vllm.cpp/third_party/vulkan/**",
     "/vllm.cpp/LICENSE",
     "/vllm.cpp/NOTICE",
     "/vllm.cpp/third_party/README.md",
@@ -36,6 +40,10 @@ default = ["bundled"]
 bundled = []
 system = []
 dynamic-link = []
+cuda = []
+cuda-cutlass = ["cuda"]
+triton-aot = ["cuda"]
+vulkan = []
 
 [build-dependencies]
 cmake = "0.1.58"
