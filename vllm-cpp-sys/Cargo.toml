@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Raw Rust bindings and a bundled build for vllm.cpp"
+description = "Raw FFI bindings and native build integration for the stable vllm.cpp C API"
+readme = "README.md"
+documentation = "https://docs.rs/vllm-cpp-sys"
+keywords = ["llm", "inference", "ffi", "bindings", "vllm"]
+categories = ["external-ffi-bindings"]
 links = "vllm"
 build = "build.rs"
 include = [
@@ -44,6 +48,9 @@ cuda = []
 cuda-cutlass = ["cuda"]
 triton-aot = ["cuda"]
 vulkan = []
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [build-dependencies]
 cmake = "0.1.58"
