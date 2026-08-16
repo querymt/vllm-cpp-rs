@@ -22,10 +22,11 @@
 //!
 //! The default `bundled` feature compiles and statically links the packaged
 //! pinned source. `system` links a caller-provided compatible installation, and
-//! `dynamic-link` selects `libvllm.so` in either source mode. Dynamic consumers
-//! must deploy the shared library and dependencies through the platform loader.
-//! CUDA, external CUTLASS, Triton AOT, and Vulkan features are experimental
-//! bundled build configuration and require their documented native inputs.
+//! `dynamic-link` selects the platform `libvllm` shared library in either source
+//! mode. Dynamic consumers must deploy that library and its dependencies through
+//! the platform loader. CUDA, external CUTLASS, Triton AOT, Vulkan, Metal, and
+//! external MLX features are experimental bundled build configuration and require
+//! their documented targets and native inputs.
 //!
 //! Native Linux x86_64 CPU is the supported runtime tier. Building the bundled
 //! source requires CMake 3.24 or newer, a build tool, C11 and C++20 compilers,

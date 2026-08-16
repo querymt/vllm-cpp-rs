@@ -51,8 +51,16 @@ fn write_file(path: &Path) {
 }
 
 #[test]
-fn shared_library_name_uses_linux_soname() {
-    assert_eq!(shared_library_name("vllm"), "libvllm.so");
+fn shared_library_name_is_target_aware() {
+    assert_eq!(shared_library_name("vllm", "linux").unwrap(), "libvllm.so");
+    assert_eq!(
+        shared_library_name("vllm", "macos").unwrap(),
+        "libvllm.dylib"
+    );
+    assert_eq!(
+        shared_library_name("vllm", "windows").unwrap_err(),
+        "shared libraries are unsupported for target OS windows"
+    );
 }
 
 #[test]

@@ -20,6 +20,8 @@ cuda = ["vllm-cpp-sys/cuda"]
 cuda-cutlass = ["cuda", "vllm-cpp-sys/cuda-cutlass"]
 triton-aot = ["cuda", "vllm-cpp-sys/triton-aot"]
 vulkan = ["vllm-cpp-sys/vulkan"]
+metal = ["vllm-cpp-sys/metal"]
+mlx = ["metal", "vllm-cpp-sys/mlx"]
 serde = ["dep:serde_json"]
 
 [package.metadata.docs.rs]

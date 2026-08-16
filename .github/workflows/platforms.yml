@@ -1,0 +1,178 @@
+name: platforms
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
+  CMAKE_GENERATOR: Ninja
+  NATIVE_SHA: 34aedfbe8ed9779697905541a62e2160ccfd9c05
+
+jobs:
+  msrv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact sources
+        uses: actions/checkout@v4.4.0
+        with:
+          submodules: recursive
+      - name: Verify checkout and native pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD:vllm-cpp-sys/vllm.cpp)" = "$NATIVE_SHA"
+          test "$(git -C vllm-cpp-sys/vllm.cpp rev-parse HEAD)" = "$NATIVE_SHA"
+          test -z "$(git -C vllm-cpp-sys/vllm.cpp status --porcelain)"
+      - name: Install exact Rust toolchain
+        uses: dtolnay/rust-toolchain@1.85.0
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
+      - name: Install Just
+        uses: extractions/setup-just@v3.1.0
+        with:
+          just-version: "1.40.0"
+      - name: Check exact MSRV
+        env:
+          RUSTUP_TOOLCHAIN: 1.85.0
+        run: just msrv
+
+  linux-arm64-cpu:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact sources
+        uses: actions/checkout@v4.4.0
+        with:
+          submodules: recursive
+      - name: Verify checkout, native pin, and host
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD:vllm-cpp-sys/vllm.cpp)" = "$NATIVE_SHA"
+          test "$(git -C vllm-cpp-sys/vllm.cpp rev-parse HEAD)" = "$NATIVE_SHA"
+          test -z "$(git -C vllm-cpp-sys/vllm.cpp status --porcelain)"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
+      - name: Test model-free ARM64 CPU targets
+        run: env -u VLLM_CPP_TEST_MODEL cargo test --locked --workspace --all-targets --features vllm-cpp/serde
+
+  macos-arm64-cpu:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact sources
+        uses: actions/checkout@v4.4.0
+        with:
+          submodules: recursive
+      - name: Verify checkout, native pin, and host
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 15
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD:vllm-cpp-sys/vllm.cpp)" = "$NATIVE_SHA"
+          test "$(git -C vllm-cpp-sys/vllm.cpp rev-parse HEAD)" = "$NATIVE_SHA"
+          test -z "$(git -C vllm-cpp-sys/vllm.cpp status --porcelain)"
+          command -v cmake
+          command -v ninja
+          xcrun --find clang++
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Test model-free Apple ARM64 CPU targets
+        run: env -u VLLM_CPP_TEST_MODEL cargo test --locked --workspace --all-targets --features vllm-cpp/serde
+
+  macos-arm64-metal-build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact sources
+        uses: actions/checkout@v4.4.0
+        with:
+          submodules: recursive
+      - name: Verify checkout, native pin, and Metal toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 15
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD:vllm-cpp-sys/vllm.cpp)" = "$NATIVE_SHA"
+          test "$(git -C vllm-cpp-sys/vllm.cpp rev-parse HEAD)" = "$NATIVE_SHA"
+          test -z "$(git -C vllm-cpp-sys/vllm.cpp status --porcelain)"
+          command -v cmake
+          command -v ninja
+          xcrun --find clang++
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          test -d "$sdk/System/Library/Frameworks/Metal.framework"
+          test -d "$sdk/System/Library/Frameworks/Foundation.framework"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Compile and link Metal Rust targets
+        run: cargo test --locked -p vllm-cpp-sys --release --tests --features metal --no-run
+
+  vulkan-llvmpipe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out exact sources
+        uses: actions/checkout@v4.4.0
+        with:
+          submodules: recursive
+      - name: Verify checkout and native pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD:vllm-cpp-sys/vllm.cpp)" = "$NATIVE_SHA"
+          test "$(git -C vllm-cpp-sys/vllm.cpp rev-parse HEAD)" = "$NATIVE_SHA"
+          test -z "$(git -C vllm-cpp-sys/vllm.cpp status --porcelain)"
+      - name: Install Rust and Vulkan dependencies
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Mesa llvmpipe
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential cmake mesa-vulkan-drivers ninja-build python3 vulkan-tools
+          mapfile -t icds < <(dpkg -L mesa-vulkan-drivers | grep -E '/lvp_icd[^/]*\.json$')
+          test "${#icds[@]}" -eq 1
+          echo "VK_DRIVER_FILES=${icds[0]}" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=${icds[0]}" >> "$GITHUB_ENV"
+      - name: Require llvmpipe Vulkan 1.1 and 16-bit storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          vulkaninfo --summary | tee vulkan-summary.txt
+          grep -Eiq 'deviceName.*llvmpipe' vulkan-summary.txt
+          grep -Eq 'apiVersion.*1\.[1-9]' vulkan-summary.txt
+          vulkaninfo | tee vulkan-info.txt
+          grep -Eq 'storageBuffer16BitAccess[[:space:]]*=[[:space:]]*true' vulkan-info.txt
+      - name: Compile and link the Rust Vulkan surface
+        run: cargo test --locked -p vllm-cpp-sys --release --tests --features vulkan --no-run
+      - name: Build and run native Vulkan backend and op gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S vllm-cpp-sys/vllm.cpp -B target/vulkan-native \
+            -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DVLLM_CPP_BUILD_TESTS=ON -DVLLM_CPP_BUILD_EXAMPLES=OFF \
+            -DVLLM_CPP_SERVER=OFF -DVLLM_CPP_CUDA=OFF \
+            -DVLLM_CPP_METAL=OFF -DVLLM_CPP_MLX=OFF \
+            -DVLLM_CPP_VULKAN=ON -DVLLM_CPP_TRITON=OFF
+          cmake --build target/vulkan-native --target test_vulkan_backend test_backend_cross_device
+          ctest --test-dir target/vulkan-native --output-on-failure \
+            --tests-regex '^(test_vulkan_backend|test_backend_cross_device)$'
