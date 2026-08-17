@@ -1,12 +1,24 @@
 use static_assertions::{assert_impl_all, assert_not_impl_any};
-use vllm_cpp::{Engine, Error, Request, SchedulerPolicy, Toggle};
+use vllm_cpp::{
+    Engine, Error, HuggingFaceError, HuggingFaceModel, Request, SchedulerPolicy, Toggle,
+};
 
 assert_impl_all!(Engine: Send, Sync, Clone);
+assert_impl_all!(HuggingFaceError: Clone, std::fmt::Debug, Eq, PartialEq);
+assert_impl_all!(HuggingFaceModel: Clone, std::fmt::Debug);
 assert_impl_all!(Request: Send);
 assert_not_impl_any!(Request: Sync);
 
 fn missing_model() -> &'static str {
     "/nonexistent/vllm-cpp-rs-safe-api-model"
+}
+
+#[test]
+fn hugging_face_constructors_accept_default_and_explicit_revisions() {
+    let gguf = HuggingFaceModel::gguf("owner/model", "model.gguf");
+    let safetensors = HuggingFaceModel::safetensors("owner/model").revision("release");
+    assert!(format!("{gguf:?}").contains("revision: \"main\""));
+    assert!(format!("{safetensors:?}").contains("revision: \"release\""));
 }
 
 #[test]

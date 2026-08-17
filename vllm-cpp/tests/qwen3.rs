@@ -551,6 +551,44 @@ fn structured_choice_is_enforced() {
 }
 
 #[test]
+fn structured_json_schema_is_enforced() {
+    with_engine(|engine, _| {
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "location": { "type": "string" },
+                "temperature_celsius": { "type": "number" },
+                "condition": { "type": "string" }
+            },
+            "required": ["location", "temperature_celsius", "condition"],
+            "additionalProperties": false
+        }"#;
+        let params = SamplingParams::greedy()
+            .max_tokens(64)
+            .structured_output(StructuredOutput::JsonSchema(schema.to_owned()));
+        let completion = engine
+            .complete(
+                "Extract the weather report as JSON: Paris is sunny and 22 degrees Celsius.",
+                &params,
+            )
+            .expect("JSON Schema completion");
+        let value: serde_json::Value =
+            serde_json::from_str(completion.text.trim()).expect("valid structured JSON");
+        let object = value.as_object().expect("JSON object");
+        assert_eq!(object.len(), 3, "unexpected properties: {object:?}");
+        assert!(object
+            .get("location")
+            .is_some_and(|value| value.is_string()));
+        assert!(object
+            .get("temperature_celsius")
+            .is_some_and(|value| value.is_number()));
+        assert!(object
+            .get("condition")
+            .is_some_and(|value| value.is_string()));
+    });
+}
+
+#[test]
 fn terminal_stop_is_natural_finish_for_completion_and_chat() {
     with_engine(|engine, _| {
         let mut completion_finished = false;
