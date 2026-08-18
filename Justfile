@@ -2,7 +2,6 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 root := justfile_directory()
 bindings_file := root + "/vllm-cpp-sys/src/bindings.rs"
-model_revision := "c1899de289a04d12100db370d81485cdf75e47ca"
 
 # Maintainer workflows require Just 1.40 or newer.
 
@@ -491,6 +490,7 @@ package-test:
       examples/common/mod.rs \
       examples/complete.rs \
       examples/concurrent.rs \
+      examples/setup_test_model.rs \
       examples/stream.rs \
       examples/structured.rs \
       src/callback.rs \
@@ -757,13 +757,16 @@ package-test:
     EOF
     cat > "$safe_consumer/src/main.rs" <<'EOF'
     use vllm_cpp::{
-        abi_version, expected_abi_version, Engine, Error, HuggingFaceModel, SamplingParams,
+        abi_version, expected_abi_version, version, Engine, Error, HuggingFaceModel, SamplingParams,
     };
 
     fn main() {
         assert_eq!(expected_abi_version(), 10);
         assert_eq!(abi_version(), 10);
-        let _params = SamplingParams::greedy().max_tokens(1);
+        assert!(!version().expect("native version").is_empty());
+        let _params = SamplingParams::greedy()
+            .max_tokens(1)
+            .logits_processor(|_, logits| logits.fill(0.0));
         let resolver = HuggingFaceModel::gguf("owner/model", "model.gguf")
             .revision("revision")
             .cache_dir("/nonexistent/vllm-cpp-rs-safe-package-hf-cache")
@@ -804,45 +807,12 @@ publish-dry-run:
     # dry-run preserves Cargo's sys-first order without requiring sys on crates.io.
     cargo publish --workspace --locked --dry-run --allow-dirty --no-verify
 
-# Download and verify the pinned Qwen3-0.6B model fixture.
-setup-test-model destination=env_var_or_default("VLLM_CPP_TEST_MODEL", env_var_or_default("XDG_CACHE_HOME", env_var("HOME") + "/.cache") + "/vllm-cpp-rs/Qwen3-0.6B-" + model_revision):
+# Resolve the pinned Qwen3-0.6B test fixture into the standard Hugging Face cache.
+setup-test-model:
     #!/usr/bin/env bash
     set -euo pipefail
-    revision={{ quote(model_revision) }}
-    base="https://huggingface.co/Qwen/Qwen3-0.6B/resolve/$revision"
-    destination={{ quote(destination) }}
-    mkdir -p "$destination"
-
-    files=(
-      LICENSE
-      config.json
-      generation_config.json
-      merges.txt
-      model.safetensors
-      tokenizer.json
-      tokenizer_config.json
-      vocab.json
-    )
-    for file in "${files[@]}"; do
-      if [[ ! -f $destination/$file ]]; then
-        echo "downloading $file" >&2
-        curl --fail --location --retry 3 --continue-at - \
-          "$base/$file" --output "$destination/$file"
-      fi
-    done
-
-    cat > "$destination/SHA256SUMS.expected" <<'EOF'
-    832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e  LICENSE
-    660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd  config.json
-    2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2  generation_config.json
-    8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5  merges.txt
-    f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b  model.safetensors
-    aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4  tokenizer.json
-    d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101  tokenizer_config.json
-    ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910  vocab.json
-    EOF
-    (cd "$destination" && sha256sum --check SHA256SUMS.expected) >&2
-    printf '%s\n' "$destination"
+    cd {{ quote(root) }}
+    cargo run --quiet --locked -p vllm-cpp --example setup_test_model
 
 # Run the full safe/request/model suites with ASan, UBSan, and leak detection.
 sanitizers model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
@@ -850,23 +820,11 @@ sanitizers model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
     set -euo pipefail
     model={{ quote(model) }}
     if [[ -z $model ]]; then
-      echo 'set VLLM_CPP_TEST_MODEL or pass model=<verified-model-directory>' >&2
+      echo 'set VLLM_CPP_TEST_MODEL or pass model=<prepared-model-directory>' >&2
       exit 1
     fi
-    required_model_files=(
-      model.safetensors
-      config.json
-      tokenizer.json
-      tokenizer_config.json
-    )
-    missing=()
-    for file in "${required_model_files[@]}"; do
-      [[ -f $model/$file ]] || missing+=("$file")
-    done
-    if ((${#missing[@]})); then
-      printf 'model fixture is incomplete at %s; missing:' "$model" >&2
-      printf ' %s' "${missing[@]}" >&2
-      printf '\n' >&2
+    if [[ ! -d $model ]]; then
+      echo "model fixture is not a directory: $model" >&2
       exit 1
     fi
     cd {{ quote(root) }}
@@ -908,23 +866,11 @@ tsan model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
     fi
     model={{ quote(model) }}
     if [[ -z $model ]]; then
-      echo 'set VLLM_CPP_TEST_MODEL or pass model=<verified-model-directory>' >&2
+      echo 'set VLLM_CPP_TEST_MODEL or pass model=<prepared-model-directory>' >&2
       exit 1
     fi
-    required_model_files=(
-      model.safetensors
-      config.json
-      tokenizer.json
-      tokenizer_config.json
-    )
-    missing=()
-    for file in "${required_model_files[@]}"; do
-      [[ -f $model/$file ]] || missing+=("$file")
-    done
-    if ((${#missing[@]})); then
-      printf 'model fixture is incomplete at %s; missing:' "$model" >&2
-      printf ' %s' "${missing[@]}" >&2
-      printf '\n' >&2
+    if [[ ! -d $model ]]; then
+      echo "model fixture is not a directory: $model" >&2
       exit 1
     fi
     cd {{ quote(root) }}

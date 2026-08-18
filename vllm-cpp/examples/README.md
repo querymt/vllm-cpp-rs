@@ -1,6 +1,6 @@
 # examples
 
-these examples exercise the safe `vllm-cpp` api. four use fixed prompts and settings; `chat` is an interactive command-line application:
+five examples exercise the safe `vllm-cpp` api: four use fixed prompts and settings, and `chat` is an interactive command-line application. one additional maintainer utility prepares the pinned test fixture:
 
 | example | behavior |
 |---|---|
@@ -9,6 +9,7 @@ these examples exercise the safe `vllm-cpp` api. four use fixed prompts and sett
 | [`concurrent`](concurrent.rs) | submits two asynchronous streaming requests and waits for both |
 | [`chat`](chat.rs) | runs a Clap-based interactive chat with conversation history and streaming output |
 | [`structured`](structured.rs) | extracts a fixed weather report under a JSON Schema |
+| [`setup_test_model`](setup_test_model.rs) | resolves the pinned Qwen test fixture for `just setup-test-model`; not a general inference CLI |
 
 The four fixed examples (`complete`, `stream`, `concurrent`, and `structured`) accept the same manual model-source forms:
 

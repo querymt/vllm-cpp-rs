@@ -14,7 +14,7 @@ println!("{}", completion.text);
 # Ok::<(), vllm_cpp::Error>(())
 ```
 
-`Engine::load` accepts either a model directory or a standalone GGUF file understood by the pinned native engine. The known-good Safetensors test layout contains `model.safetensors`, `config.json`, `tokenizer.json`, and `tokenizer_config.json`; model-family compatibility remains a native vllm.cpp concern. See the packaged [examples guide](examples/README.md) for local and Hugging Face loading, blocking completion, streaming, JSON-Schema output, concurrent-request commands, and the Clap-based interactive chat CLI with retained history and supported sampling controls.
+`Engine::load` accepts either a model directory or a standalone GGUF file understood by the pinned native engine. `HuggingFaceModel::safetensors` resolves and validates a complete loader snapshot, including unsharded or indexed weights; model-family compatibility remains a native vllm.cpp concern. See the packaged [examples guide](examples/README.md) for local and Hugging Face loading, blocking completion, streaming, JSON-Schema output, concurrent-request commands, and the Clap-based interactive chat CLI with retained history and supported sampling controls.
 
 ## Hugging Face models
 
@@ -37,14 +37,19 @@ GGUF mode retrieves one root-level lowercase `.gguf` file and rejects split sets
 
 Retrieval validates cache and snapshot completeness; it does not prove that the pinned native engine supports the repository's model architecture, tokenizer, quantization, or backend.
 
+In the repository checkout, `just setup-test-model` explicitly resolves `Qwen/Qwen3-0.6B` at immutable revision `c1899de289a04d12100db370d81485cdf75e47ca`, reusing the standard Hugging Face cache and honoring normal `HF_HOME` and authentication. Ordinary tests and instrumentation commands never resolve or download this fixture. `VLLM_CPP_TEST_MODEL` remains an external contract: when supplied, it must point to a prepared model directory; model tests skip when it is unset.
+
 ## API and ownership
 
 - `EngineBuilder` configures and loads a model. `Engine` is `Clone + Send + Sync`; clones share one reference-counted native engine.
-- `SamplingParams` owns stop strings and structured constraints. Completion, chat, error, and stream text is copied into Rust-owned values before native storage is released or reused.
+- `SamplingParams` owns stop strings, structured constraints, and an optional `Send + Sync` custom logits processor. The processor receives generated token IDs and a mutable logits row each decode step; panics are contained and returned as `Error::LogitsProcessorPanicked`. Processor-backed generation must have a finite `max_tokens` bound because ABI v10 cannot abort from that callback. Each processor invocation retains its state until the engine is dropped because ABI v10 has no sampler-quiescence primitive.
+- Completion, chat, error, and stream text is copied into Rust-owned values before native storage is released or reused.
 - Blocking `complete`, `complete_stream`, `chat_json`, and `chat_stream_json` calls keep borrowed callbacks alive only for the call. Callback panics are caught before crossing C and resumed after the native call returns.
 - `Engine::submit` returns a `Request` before generation finishes. A request retains its engine and callback until native free/join completes, is `Send`, and is deliberately not `Sync`.
 - Asynchronous callbacks run on a native delivery thread and must be `Send + 'static`. `wait` reports callback panics as `Error::CallbackPanicked`; waiting or freeing from that same callback thread is prohibited by ABI v10, so callback-thread drop transfers cleanup to a prestarted reaper.
 - Dropping a live request cancels and joins it. `cancel` is idempotent, `wait` reports the request outcome, and `native_error` copies the request-owned diagnostic after completion into an owned Rust `String`; the native storage remains valid until the request is dropped or freed.
+
+`SchedulerPolicy::Priority` selects the native priority queue, but ABI v10 assigns priority zero to every safe blocking, streaming, chat, and asynchronous submission. Until a future ABI carries per-request priority, safe requests therefore remain ordered by arrival.
 
 ## Features and linking
 
@@ -67,7 +72,7 @@ Hugging Face resolution is not a Cargo feature: synchronous `hf-hub` support is 
 
 ## ABI and deployment
 
-This crate is tied to the exact same `vllm-cpp-sys` crate version and the pinned vllm.cpp commit `34aedfbe8ed9779697905541a62e2160ccfd9c05`. Model loading requires exact C ABI version 10 before any versioned struct crosses FFI. A system library must implement the same ABI; the consumer build checks for its header, while maintainer conformance tests check layout and symbols.
+This crate is tied to the exact same `vllm-cpp-sys` crate version and the pinned vllm.cpp commit `34aedfbe8ed9779697905541a62e2160ccfd9c05`. Model loading requires exact C ABI version 10 before any versioned struct crosses FFI. `version()` copies the linked library's diagnostic native version string, while `abi_version()` remains the compatibility authority. A system library must implement the same ABI; the consumer build checks for its header, while maintainer conformance tests check layout and symbols.
 
 Static bundled builds include the native archive in the application link. Dynamic bundled or system builds do not deploy `libvllm.so`/`libvllm.dylib`: install it and its backend/toolkit dependencies in a loader-visible location using `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, rpath supplied by the application, or the system loader configuration. System mode uses `VLLM_CPP_ROOT`; `VLLM_CPP_LIB_DIR` can choose a nonstandard library directory. System static linking also requires the matching `libblake3_vendored.a` through `VLLM_CPP_BLAKE3_LIB_DIR` or the selected vllm library directory.
 

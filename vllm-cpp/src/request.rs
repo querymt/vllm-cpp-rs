@@ -13,7 +13,7 @@ use vllm_cpp_sys as ffi;
 use crate::callback::{StreamControl, StreamEvent};
 use crate::engine::{Engine, EngineInner};
 use crate::error::{status_result, Error};
-use crate::params::{to_cstring, SamplingParams};
+use crate::params::{to_cstring, LogitsProcessorState, SamplingParams};
 
 /// How a successfully waited non-blocking request ended.
 ///
@@ -40,6 +40,7 @@ pub enum RequestOutcome {
 pub struct Request {
     raw: Option<NonNull<ffi::vllm_request>>,
     callback: Option<Box<AsyncCallbackState>>,
+    logits_processor: Option<Arc<LogitsProcessorState>>,
     engine: Option<Arc<EngineInner>>,
     cancellation_requested: bool,
     _not_sync: PhantomData<Cell<()>>,
@@ -72,7 +73,10 @@ impl Engine {
     {
         cleanup_sender()?;
         let prompt = to_cstring(prompt, "prompt")?;
-        let params = params.marshal()?;
+        let mut params = params.marshal()?;
+        if let Some(logits_processor) = params.logits_processor() {
+            self.retain_logits_processor(logits_processor);
+        }
         let mut callback = Box::new(AsyncCallbackState::new(callback));
         let mut output = ptr::null_mut();
         // SAFETY: the engine is retained by the returned Request, native code
@@ -88,13 +92,22 @@ impl Engine {
                 &mut output,
             )
         };
-        status_result(status)?;
-        let raw = NonNull::new(output).ok_or_else(|| Error::Runtime {
-            message: "vllm_request_submit succeeded without a request handle".to_owned(),
-        })?;
+        if status != ffi::vllm_status_VLLM_OK {
+            status_result(status)?;
+            unreachable!("non-OK native status unexpectedly succeeded");
+        }
+        let raw = match NonNull::new(output) {
+            Some(raw) => raw,
+            None => {
+                return Err(Error::Runtime {
+                    message: "vllm_request_submit succeeded without a request handle".to_owned(),
+                });
+            }
+        };
         Ok(Request {
             raw: Some(raw),
             callback: Some(callback),
+            logits_processor: params.take_logits_processor(),
             engine: Some(Arc::clone(&self.inner)),
             cancellation_requested: false,
             _not_sync: PhantomData,
@@ -106,9 +119,7 @@ impl Request {
     /// Returns whether native callback delivery has finished.
     #[must_use]
     pub fn is_done(&self) -> bool {
-        // SAFETY: raw remains a live request handle until Drop, and the native
-        // completion probe is atomic and accepts concurrent callback delivery.
-        unsafe { ffi::vllm_request_done(self.raw().as_ptr()) }
+        self.native_done()
     }
 
     /// Requests cancellation.
@@ -132,13 +143,16 @@ impl Request {
     /// Calling this from this request's own callback returns
     /// [`Error::RequestCallbackThread`] without entering native code.
     pub fn wait(&mut self) -> Result<RequestOutcome, Error> {
-        if self.callback().is_delivery_thread() {
+        if self.is_native_callback_thread() {
             return Err(Error::RequestCallbackThread { operation: "wait" });
         }
         // SAFETY: mutable access serializes safe lifecycle calls, raw is live,
         // and the delivery-thread case was rejected before the FFI call.
         let status = unsafe { ffi::vllm_request_wait(self.raw().as_ptr()) };
         let native_result = status_result(status);
+        if let Some(error) = self.logits_processor_error() {
+            return Err(error);
+        }
         let callback_result = self.callback().result(self.cancellation_requested);
         match callback_result {
             Err(error) => Err(error),
@@ -185,19 +199,44 @@ impl Request {
         self.raw.expect("live Request always has a native handle")
     }
 
+    fn native_done(&self) -> bool {
+        // SAFETY: raw remains a live request handle until Drop, and the native
+        // completion probe is atomic and accepts concurrent callback delivery.
+        unsafe { ffi::vllm_request_done(self.raw().as_ptr()) }
+    }
+
     fn callback(&self) -> &AsyncCallbackState {
         self.callback
             .as_deref()
             .expect("live Request always has callback state")
     }
+
+    fn logits_processor_error(&self) -> Option<Error> {
+        self.logits_processor
+            .as_deref()
+            .and_then(LogitsProcessorState::error)
+    }
+
+    fn is_native_callback_thread(&self) -> bool {
+        self.callback().is_delivery_thread()
+            || self
+                .logits_processor
+                .as_deref()
+                .is_some_and(LogitsProcessorState::is_active_on_current_thread)
+    }
 }
 
 impl Drop for Request {
     fn drop(&mut self) {
-        let parts = (self.raw.take(), self.callback.take(), self.engine.take());
+        let parts = (
+            self.raw.take(),
+            self.callback.take(),
+            self.logits_processor.take(),
+            self.engine.take(),
+        );
         match parts {
-            (Some(raw), Some(callback), Some(engine)) => {
-                CleanupJob::new(raw, callback, engine).run();
+            (Some(raw), Some(callback), logits_processor, Some(engine)) => {
+                CleanupJob::new(raw, callback, logits_processor, engine).run();
             }
             parts => {
                 // A partial Request would make either freeing or dropping its
@@ -361,6 +400,7 @@ enum CleanupState {
     Armed {
         raw: NonNull<ffi::vllm_request>,
         callback: Box<AsyncCallbackState>,
+        logits_processor: Option<Arc<LogitsProcessorState>>,
         engine: Arc<EngineInner>,
     },
     Disarmed,
@@ -370,12 +410,14 @@ impl CleanupJob {
     fn new(
         raw: NonNull<ffi::vllm_request>,
         callback: Box<AsyncCallbackState>,
+        logits_processor: Option<Arc<LogitsProcessorState>>,
         engine: Arc<EngineInner>,
     ) -> Self {
         Self {
             state: CleanupState::Armed {
                 raw,
                 callback,
+                logits_processor,
                 engine,
             },
             context: CleanupContext::Caller,
@@ -392,7 +434,16 @@ impl CleanupJob {
         }
         let needs_deferral = match self.context {
             CleanupContext::Caller => match &self.state {
-                CleanupState::Armed { callback, .. } => callback.is_delivery_thread(),
+                CleanupState::Armed {
+                    callback,
+                    logits_processor,
+                    ..
+                } => {
+                    callback.is_delivery_thread()
+                        || logits_processor
+                            .as_deref()
+                            .is_some_and(LogitsProcessorState::is_active_on_current_thread)
+                }
                 CleanupState::Disarmed => return,
             },
             // A successfully sent job is owned only by the prestarted Rust reaper,
@@ -414,6 +465,7 @@ impl CleanupJob {
         let CleanupState::Armed {
             raw,
             callback,
+            logits_processor,
             engine,
         } = state
         else {
@@ -422,24 +474,25 @@ impl CleanupJob {
         // If this function unwinds, forget every owner before CleanupJob::Drop can
         // run. Repeating an opaque void free could double-free, while releasing
         // callback/engine without a known join would be unsafe.
-        let mut owners = std::mem::ManuallyDrop::new((callback, engine));
-        // ABI coupling: the native delivery thread can enter Rust only through
-        // async_callback_trampoline, which records its permanent ThreadId before
-        // user code runs. Therefore this path cannot call free on that thread.
-        // Any new native user_data entrypoint or delivery model must update that
-        // tracking before this wrapper can safely adopt it.
+        let mut owners = std::mem::ManuallyDrop::new((callback, logits_processor, engine));
+        // ABI coupling: output delivery records its permanent thread ID, while
+        // logits calls record their active thread. This path cannot free from either
+        // callback context. New native user_data entrypoints must join this tracking.
         //
-        // SAFETY: this armed job owns the request exactly once, runs off the
-        // tracked delivery thread or on the dedicated reaper after ownership
-        // transfer, and retains both callback state and parent engine. Native
-        // free cancels if needed and joins before returning.
+        // SAFETY: this job owns the request once and retains its callback and engine.
+        // Native free joins output delivery. EngineInner separately retains every
+        // logits state until engine teardown joins the sampler worker.
         unsafe { ffi::vllm_request_free(raw.as_ptr()) };
-        // SAFETY: native free returned, so delivery is joined and Rust owners can
-        // be reclaimed. ManuallyDrop prevents premature release on unwind above.
-        let (callback, engine) = unsafe { std::mem::ManuallyDrop::take(&mut owners) };
+        // SAFETY: output delivery is joined. Dropping this request-owned Arc is safe
+        // because EngineInner retains another Arc until native engine teardown.
+        let (callback, logits_processor, engine) =
+            unsafe { std::mem::ManuallyDrop::take(&mut owners) };
         // User callback captures and a stored panic payload can have arbitrary
         // destructors. Never let them unwind out of cleanup.
         if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(callback))) {
+            std::mem::forget(payload);
+        }
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(logits_processor))) {
             std::mem::forget(payload);
         }
         drop(engine);

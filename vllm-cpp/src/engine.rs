@@ -3,7 +3,7 @@ use std::mem::MaybeUninit;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use vllm_cpp_sys as ffi;
 
@@ -11,7 +11,7 @@ use crate::callback::{
     callback_trampoline, CallbackState, StreamControl, StreamEvent, StreamOutcome,
 };
 use crate::error::{invalid_configuration, status_result, Error};
-use crate::params::{SamplingParams, SchedulerPolicy, Toggle};
+use crate::params::{LogitsProcessorState, SamplingParams, SchedulerPolicy, Toggle};
 
 /// A cloneable vllm.cpp serving engine.
 #[derive(Clone)]
@@ -21,6 +21,7 @@ pub struct Engine {
 
 pub(crate) struct EngineInner {
     pub(crate) raw: NonNull<ffi::vllm_engine>,
+    logits_processors: Mutex<Vec<Arc<LogitsProcessorState>>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -74,6 +75,14 @@ pub struct Completion {
 }
 
 impl Engine {
+    pub(crate) fn retain_logits_processor(&self, state: Arc<LogitsProcessorState>) {
+        self.inner
+            .logits_processors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(state);
+    }
+
     /// Starts configuring an engine for a model directory or GGUF file.
     pub fn builder(model_path: impl Into<PathBuf>) -> EngineBuilder {
         EngineBuilder::new(model_path)
@@ -88,6 +97,9 @@ impl Engine {
     pub fn complete(&self, prompt: &str, params: &SamplingParams) -> Result<Completion, Error> {
         let prompt = to_cstring(prompt, "prompt")?;
         let params = params.marshal()?;
+        if let Some(logits_processor) = params.logits_processor() {
+            self.retain_logits_processor(logits_processor);
+        }
         let mut raw = MaybeUninit::<ffi::vllm_completion>::uninit();
         // SAFETY: the engine is owned and live, all pointers remain valid for the
         // call, and out storage is initialized by native code on success.
@@ -99,10 +111,19 @@ impl Engine {
                 raw.as_mut_ptr(),
             )
         };
-        status_result(status)?;
+        if status != ffi::vllm_status_VLLM_OK {
+            if let Some(error) = params.logits_processor_error() {
+                return Err(error);
+            }
+            status_result(status)?;
+            unreachable!("non-OK native status unexpectedly succeeded");
+        }
         // SAFETY: VLLM_OK initializes every completion field.
         let raw = unsafe { raw.assume_init() };
         let guard = CompletionGuard(raw);
+        if let Some(error) = params.logits_processor_error() {
+            return Err(error);
+        }
         completion_from_raw(&guard.0)
     }
 
@@ -121,6 +142,9 @@ impl Engine {
     {
         let prompt = to_cstring(prompt, "prompt")?;
         let params = params.marshal()?;
+        if let Some(logits_processor) = params.logits_processor() {
+            self.retain_logits_processor(logits_processor);
+        }
         let mut state = CallbackState::new(&mut callback);
         // SAFETY: state has a stable stack address for this blocking call; the C
         // API does not retain user_data after returning.
@@ -137,6 +161,9 @@ impl Engine {
             std::panic::resume_unwind(payload);
         }
         if let Some(error) = state.take_error() {
+            return Err(error);
+        }
+        if let Some(error) = params.logits_processor_error() {
             return Err(error);
         }
         status_result(status)?;
@@ -210,8 +237,9 @@ impl Engine {
 
 impl Drop for EngineInner {
     fn drop(&mut self) {
-        // SAFETY: EngineInner exclusively owns this live handle and drops it once,
-        // after every Request-owned Arc has been released.
+        // SAFETY: EngineInner exclusively owns this live handle. Native teardown
+        // joins engine workers before retained logits states drop with the other
+        // fields, so no callback can outlive its user_data.
         unsafe { ffi::vllm_engine_free(self.raw.as_ptr()) };
     }
 }
@@ -304,6 +332,10 @@ impl EngineBuilder {
         self
     }
 
+    /// Selects the native admission queue policy.
+    ///
+    /// The stable C submission API currently assigns priority zero to every
+    /// request, so [`SchedulerPolicy::Priority`] orders safe requests by arrival.
     #[must_use]
     pub fn scheduler(mut self, value: SchedulerPolicy) -> Self {
         self.scheduler = value;
@@ -370,7 +402,10 @@ impl EngineBuilder {
             message: "vllm_engine_load succeeded without a handle".to_owned(),
         })?;
         Ok(Engine {
-            inner: Arc::new(EngineInner { raw }),
+            inner: Arc::new(EngineInner {
+                raw,
+                logits_processors: Mutex::new(Vec::new()),
+            }),
         })
     }
 }

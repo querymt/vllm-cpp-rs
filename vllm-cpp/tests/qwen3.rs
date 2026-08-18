@@ -8,25 +8,12 @@ use vllm_cpp::{
     StructuredOutput,
 };
 
-const REQUIRED_MODEL_FILES: [&str; 4] = [
-    "model.safetensors",
-    "config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-];
-
 fn model_path() -> Option<PathBuf> {
     let path = std::env::var_os("VLLM_CPP_TEST_MODEL").map(PathBuf::from)?;
-    let missing = REQUIRED_MODEL_FILES
-        .iter()
-        .filter(|file| !path.join(file).is_file())
-        .copied()
-        .collect::<Vec<_>>();
     assert!(
-        missing.is_empty(),
-        "VLLM_CPP_TEST_MODEL fixture is incomplete at {}: missing {}",
-        path.display(),
-        missing.join(", ")
+        path.is_dir(),
+        "VLLM_CPP_TEST_MODEL is not a directory: {}",
+        path.display()
     );
     Some(path)
 }
@@ -526,6 +513,110 @@ fn concurrent_request_lifecycle_stress() {
             .complete("Say hello", &SamplingParams::greedy().max_tokens(2))
             .expect("engine remains reusable after lifecycle stress");
         assert!(!completion.text.is_empty());
+    });
+}
+
+#[test]
+fn custom_logits_processor_controls_tokens_and_receives_history() {
+    with_engine(|engine, _| {
+        let histories = Arc::new(Mutex::new(Vec::<Vec<i32>>::new()));
+        let params = SamplingParams::greedy().max_tokens(3).logits_processor({
+            let histories = Arc::clone(&histories);
+            move |tokens, logits| {
+                histories
+                    .lock()
+                    .expect("processor histories")
+                    .push(tokens.to_vec());
+                let forced = if tokens.is_empty() { 10 } else { 11 };
+                logits.fill(f32::NEG_INFINITY);
+                logits[forced] = f32::INFINITY;
+            }
+        });
+        let completion = engine
+            .complete("Say anything", &params)
+            .expect("custom processor completion");
+        assert_eq!(completion.completion_tokens, 3);
+        assert_eq!(
+            *histories.lock().expect("processor histories"),
+            vec![vec![], vec![10], vec![10, 11]]
+        );
+    });
+}
+
+#[test]
+fn logits_processor_panic_is_contained_for_blocking_and_async_requests() {
+    with_engine(|engine, _| {
+        let params = SamplingParams::greedy()
+            .max_tokens(2)
+            .logits_processor(|_, _| panic!("intentional logits processor panic"));
+        let error = engine
+            .complete("Say hello", &params)
+            .expect_err("blocking processor panic");
+        assert_eq!(error, Error::LogitsProcessorPanicked);
+
+        let mut request = engine
+            .submit("Say hello", &params, |_| StreamControl::Continue)
+            .expect("submit processor panic request");
+        assert_eq!(
+            request.wait().expect_err("async processor panic"),
+            Error::LogitsProcessorPanicked
+        );
+
+        let completion = engine
+            .complete("Say hello", &SamplingParams::greedy().max_tokens(1))
+            .expect("engine remains reusable");
+        assert!(!completion.text.is_empty());
+    });
+}
+
+#[test]
+fn logits_processor_self_wait_is_rejected_and_state_is_retained() {
+    with_engine(|engine, _| {
+        let slot = Arc::new(Mutex::new(None::<Request>));
+        let processor_ready = Arc::new(Barrier::new(2));
+        let (result_sender, result_receiver) = mpsc::channel();
+        let (drop_sender, drop_receiver) = mpsc::channel();
+
+        struct ProcessorDropProbe(mpsc::Sender<thread::ThreadId>);
+        impl Drop for ProcessorDropProbe {
+            fn drop(&mut self) {
+                let _ = self.0.send(thread::current().id());
+            }
+        }
+
+        let params = SamplingParams::greedy().max_tokens(8).logits_processor({
+            let slot = Arc::clone(&slot);
+            let processor_ready = Arc::clone(&processor_ready);
+            let result_sender = result_sender.clone();
+            let drop_probe = ProcessorDropProbe(drop_sender);
+            move |_, _| {
+                let _ = &drop_probe;
+                processor_ready.wait();
+                if let Some(mut request) = slot.lock().expect("request slot").take() {
+                    let thread_id = thread::current().id();
+                    let error = request.wait().expect_err("self wait rejection");
+                    result_sender
+                        .send((thread_id, error))
+                        .expect("processor result");
+                    drop(request);
+                }
+            }
+        });
+        let request = engine
+            .submit("Count from one:", &params, |_| StreamControl::Continue)
+            .expect("submit processor self-lifecycle request");
+        drop(params);
+        *slot.lock().expect("request slot") = Some(request);
+        processor_ready.wait();
+
+        let (_processor_thread, error) = result_receiver
+            .recv_timeout(Duration::from_secs(30))
+            .expect("processor self-wait result");
+        assert_eq!(error, Error::RequestCallbackThread { operation: "wait" });
+        assert!(matches!(
+            drop_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
     });
 }
 

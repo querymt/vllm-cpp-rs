@@ -20,7 +20,7 @@ Native builds require:
 - Ninja or another CMake build tool.
 - A C11 and C++20 compiler.
 - A system linker and C++ standard library.
-- Just 1.40 or newer for maintainer workflows, plus Git, `jq`, GNU tar, and `curl` for the model fixture recipe.
+- Just 1.40 or newer for maintainer workflows, plus Git, `jq`, and GNU tar.
 
 This repository provides a Nix development shell with the pinned development tools. Linux also has minimal CUDA and Vulkan shells:
 
@@ -43,13 +43,13 @@ git submodule update --init --recursive
 
 The packaged [`vllm-cpp` guide](vllm-cpp/README.md) covers local and Hugging Face model resolution, safe ownership, callbacks, concurrency, features, link modes, and deployment. The [`vllm-cpp-sys` guide](vllm-cpp-sys/README.md) documents the raw ABI and native build boundary.
 
-`Engine::load` accepts a native-compatible model directory or standalone GGUF. `HuggingFaceModel` synchronously resolves into the normal Hugging Face cache before engine construction, defaulting to the Hub's mutable `main` revision; `.revision(...)` can pin a branch, tag, or commit. GGUF mode selects one safe root file. Safetensors mode pins downloads to repository metadata's commit SHA and retrieves only native runtime requirements: root configuration/tokenizer files and either unsharded weights or an index plus all root shards. Every runnable example accepts a bare or explicit local path and both Hub artifact forms with optional `--revision`. Cached downloads are reused. Retrieval does not prove model/backend compatibility.
+`Engine::load` accepts a native-compatible model directory or standalone GGUF. `HuggingFaceModel` synchronously resolves into the normal Hugging Face cache before engine construction, defaulting to the Hub's mutable `main` revision; `.revision(...)` can pin a branch, tag, or commit. GGUF mode selects one safe root file. Safetensors mode pins downloads to repository metadata's commit SHA and retrieves only native runtime requirements: root configuration/tokenizer files and either unsharded weights or an index plus all root shards. Every inference example accepts a bare or explicit local path and both Hub artifact forms with optional `--revision`. Cached downloads are reused. Retrieval does not prove model/backend compatibility.
 
-`EngineBuilder` owns model settings and converts them to temporary C strings only for the load call. `SamplingParams` owns stop strings and structured constraints. Completion and chat strings are copied into Rust values before the matching native free function runs.
+`EngineBuilder` owns model settings and converts them to temporary C strings only for the load call. `SamplingParams` owns stop strings, structured constraints, and optional `Send + Sync` custom logits processors. Processor panics are contained before the C boundary and reported through Rust errors; processor-backed generation must be bounded because ABI v10 has no callback abort channel. Each processor invocation retains its state until the engine is dropped because ABI v10 has no sampler-quiescence primitive. `version()` copies the linked native diagnostic version string. Completion and chat strings are copied into Rust values before the matching native free function runs.
 
 `Engine` is `Clone + Send + Sync`; each `Request` retains the shared engine until native callback delivery has joined. A request is `Send` but deliberately not `Sync`. `submit` returns before generation finishes, and `Request` provides `is_done`, idempotent `cancel`, `wait`, and copied `native_error` diagnostics. `wait` classifies completion as `Completed`, `StoppedByCallback`, or `Cancelled`; an explicit asynchronous `Stop` is classified as `StoppedByCallback` even when returned for the terminal event.
 
-All streaming callbacks receive copied UTF-8 deltas. Blocking callbacks may borrow stack data; their panics are caught before the C boundary and resumed only after the native call returns. Asynchronous callbacks must be `Send + 'static`, run on a native delivery thread, and report panic as `Error::CallbackPanicked` from `wait`. Waiting for or freeing a request from its own callback thread is prohibited by ABI v10: `wait` returns `Error::RequestCallbackThread`, while drop transfers cleanup to a prestarted reaper that owns the request, callback, and engine until native free/cancel/join completes. Chat methods accept raw OpenAI-compatible request JSON; enable `serde` for `serde_json::Value` request and response helpers.
+All streaming callbacks receive copied UTF-8 deltas. Blocking callbacks may borrow stack data; their panics are caught before the C boundary and resumed only after the native call returns. Asynchronous callbacks must be `Send + 'static`, run on a native delivery thread, and report panic as `Error::CallbackPanicked` from `wait`. Waiting for or freeing a request from its own callback thread is prohibited by ABI v10: `wait` returns `Error::RequestCallbackThread`, while drop transfers cleanup to a prestarted reaper that owns the request, callback, and engine until native free/cancel/join completes. Chat methods accept raw OpenAI-compatible request JSON; enable `serde` for `serde_json::Value` request and response helpers. `SchedulerPolicy::Priority` selects the native queue, but every ABI v10 safe submission currently has priority zero and therefore ties by arrival.
 
 See [the examples guide](vllm-cpp/examples/README.md) for ordinary Linux and optional Nix setup, commands for every example, and the interactive chat CLI's local/Hub model forms and generation options. Release-facing changes are recorded in the [changelog](CHANGELOG.md), and maintainers use the manual [release process](RELEASING.md).
 
@@ -105,7 +105,7 @@ Compilation does not establish runtime correctness. Known native evidence blocke
 
 ## Test Model and Sanitizers
 
-Model-backed tests use Apache-2.0 `Qwen/Qwen3-0.6B` at pinned revision `c1899de289a04d12100db370d81485cdf75e47ca`. Download or reuse the cache and verify every file, then run exactly 15 blocking and request-lifecycle model tests serially, including choice and JSON-Schema structured-output enforcement:
+Model-backed tests use Apache-2.0 `Qwen/Qwen3-0.6B` at pinned revision `c1899de289a04d12100db370d81485cdf75e47ca`. Explicitly resolve its complete Safetensors snapshot into the standard Hugging Face cache, then run exactly 18 blocking and request-lifecycle model tests serially, including choice and JSON-Schema structured-output enforcement:
 
 ```console
 model=$(just setup-test-model)
@@ -113,7 +113,7 @@ VLLM_CPP_TEST_MODEL="$model" \
   cargo test --locked -p vllm-cpp --release --test qwen3 -- --test-threads=1
 ```
 
-The approximately 1.5 GB model stays in the user cache and is not included in repository or crate packages. Model-backed tests skip with an explanatory message when `VLLM_CPP_TEST_MODEL` is unset. When it is set, the test helper and sanitizer gate require `model.safetensors`, `config.json`, `tokenizer.json`, and `tokenizer_config.json` and report every missing file.
+`just setup-test-model` is the only explicit test-fixture acquisition step. It uses `HuggingFaceModel` with the immutable revision above, honors normal `HF_HOME` and Hugging Face authentication, reuses the standard cache, and prints the resolved directory. The approximately 1.5 GB model is not included in repository or crate packages. Ordinary tests, sanitizers, and TSan never resolve or download models: `VLLM_CPP_TEST_MODEL` must name an externally prepared model directory. Model-backed tests skip with an explanatory message when it is unset; when set, tests and instrumentation recipes require it to be a directory.
 
 AddressSanitizer, UndefinedBehaviorSanitizer, and leak detection run the full safe/request/model suites with native instrumentation. The Linux x86_64 GCC ThreadSanitizer lane runs selected request lifecycle tests individually and instruments native C++ only; it does not claim race coverage for Rust or the Rust standard library. Callback-thread self-drop remains in the normal and ASan/leak suites because its handoff uses uninstrumented Rust synchronization.
 
