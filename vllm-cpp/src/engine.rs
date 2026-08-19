@@ -334,8 +334,11 @@ impl EngineBuilder {
 
     /// Selects the native admission queue policy.
     ///
-    /// The stable C submission API currently assigns priority zero to every
-    /// request, so [`SchedulerPolicy::Priority`] orders safe requests by arrival.
+    /// Raw and serde chat request JSON can carry a `priority` field that the native
+    /// OpenAI-compatible path parses and submits. Direct completion, completion
+    /// streaming, and `Request` submissions currently default to priority zero and
+    /// tie by arrival; caller-selected priorities for those direct APIs require a
+    /// future C ABI/API change.
     #[must_use]
     pub fn scheduler(mut self, value: SchedulerPolicy) -> Self {
         self.scheduler = value;

@@ -17,10 +17,11 @@ const NATIVE_DEFAULT_MAX_TOKENS: u32 = 16;
 
 /// Native scheduler admission order.
 ///
-/// The stable C submission API does not expose per-request priorities, so every
-/// safe completion, stream, chat, and [`crate::Request`] currently has priority
-/// zero. [`SchedulerPolicy::Priority`] therefore preserves arrival order until a
-/// future ABI adds an explicit request-priority field.
+/// Raw and serde chat request JSON can carry a `priority` field that the native
+/// OpenAI-compatible path parses and submits. Direct completion, completion
+/// streaming, and [`crate::Request`] submissions currently default to priority zero
+/// and tie by arrival; caller-selected priorities for those direct APIs require a
+/// future C ABI/API change.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SchedulerPolicy {
     /// Process requests in arrival order.
@@ -28,9 +29,8 @@ pub enum SchedulerPolicy {
     Fcfs,
     /// Order requests by priority and then arrival time.
     ///
-    /// Current safe submissions all use priority zero, so ties remain ordered by
-    /// arrival time. This variant selects the native queue; it does not assign a
-    /// nonzero priority to any request.
+    /// This variant selects the native priority queue; it does not itself assign a
+    /// priority to a request.
     Priority,
 
     /// Prefer requests sharing the longest cached prefix.

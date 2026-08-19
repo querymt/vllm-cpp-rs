@@ -49,7 +49,7 @@ In the repository checkout, `just setup-test-model` explicitly resolves `Qwen/Qw
 - Asynchronous callbacks run on a native delivery thread and must be `Send + 'static`. `wait` reports callback panics as `Error::CallbackPanicked`; waiting or freeing from that same callback thread is prohibited by ABI v10, so callback-thread drop transfers cleanup to a prestarted reaper.
 - Dropping a live request cancels and joins it. `cancel` is idempotent, `wait` reports the request outcome, and `native_error` copies the request-owned diagnostic after completion into an owned Rust `String`; the native storage remains valid until the request is dropped or freed.
 
-`SchedulerPolicy::Priority` selects the native priority queue, but ABI v10 assigns priority zero to every safe blocking, streaming, chat, and asynchronous submission. Until a future ABI carries per-request priority, safe requests therefore remain ordered by arrival.
+`SchedulerPolicy::Priority` selects the native priority queue. Raw and serde chat request JSON can carry a `priority` field that the native OpenAI-compatible path parses and submits. Direct completion, completion streaming, and `Request` submissions currently default to priority zero and tie by arrival; caller-selected priorities for those direct APIs require a future C ABI/API change.
 
 ## Features and linking
 

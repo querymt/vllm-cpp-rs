@@ -24,7 +24,7 @@ All notable changes to this project will be documented in this file.
 
 ### Known limitations
 
-- The priority scheduler is selectable, but the ABI v10 submission surface assigns every request priority zero; safe requests therefore tie by arrival until a future ABI carries per-request priority.
+- The priority scheduler is selectable, and raw and serde chat request JSON can carry a `priority` field that the native OpenAI-compatible path parses and submits. Direct completion, completion streaming, and `Request` submissions currently default to priority zero and tie by arrival; caller-selected priorities for those direct APIs remain deferred until a future C ABI/API change.
 
 - The supported runtime tier is native Linux x86_64 CPU. Accelerator features are experimental build/configuration surfaces, not runtime-support claims.
 - Known native blockers include a CUDA teardown SIGSEGV after otherwise successful tests, a CUDA bf16 numerical tolerance failure, CUTLASS concurrent-output differences, incomplete Vulkan attention/model runtime, and external MLX deployment plus unvalidated release-lane model/runtime behavior.
