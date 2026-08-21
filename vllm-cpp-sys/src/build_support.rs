@@ -65,3 +65,42 @@ pub(crate) fn find_installed_library_dir(
         )),
     }
 }
+
+pub(crate) fn cmake_cache_path(cache: &Path, key: &str) -> Result<PathBuf, String> {
+    let contents = fs::read_to_string(cache)
+        .map_err(|error| format!("could not read {}: {error}", cache.display()))?;
+    let prefix = format!("{key}:");
+    let matches: Vec<&str> = contents
+        .lines()
+        .filter_map(|line| Some(line.strip_prefix(&prefix)?.split_once('=')?.1))
+        .collect();
+
+    let value = match matches.as_slice() {
+        [value] => *value,
+        [] => return Err(format!("{key} is absent from {}", cache.display())),
+        _ => {
+            return Err(format!(
+                "{key} occurs more than once in {}",
+                cache.display()
+            ));
+        }
+    };
+    if value.is_empty() {
+        return Err(format!("{key} is empty in {}", cache.display()));
+    }
+    if value.ends_with("-NOTFOUND") {
+        return Err(format!(
+            "{key} is unresolved ({value}) in {}",
+            cache.display()
+        ));
+    }
+
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(format!(
+            "{key} must be an absolute path in {}; got {value:?}",
+            cache.display()
+        ));
+    }
+    Ok(path)
+}
