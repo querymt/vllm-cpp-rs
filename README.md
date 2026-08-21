@@ -9,11 +9,11 @@ Rust bindings for [vllm.cpp](https://github.com/mudler/vllm.cpp), organized as:
 
 The safe crate provides a cloneable engine API for model loading, blocking completion and streaming, non-blocking concurrent requests, structured output, and raw-JSON chat. An optional `serde` feature adds `serde_json::Value` chat helpers. The sys crate provides checked-in generated FFI declarations with C/Rust layout checks and coverage for all 19 exported C symbols.
 
-Linux x86_64 CPU builds support bundled static, bundled dynamic, system static, and system dynamic linking. Experimental bundled builds also expose Linux x86_64/aarch64 build configuration for CUDA, external CUTLASS, Triton AOT, and Vulkan. These accelerator features are build-only integration surfaces, not runtime-support claims. vllm.cpp is pinned at `34aedfbe8ed9779697905541a62e2160ccfd9c05`, which exposes C ABI version 10.
+Linux x86_64 CPU builds support bundled static, bundled dynamic, system static, and system dynamic linking. Bundled CPU builds also target Linux aarch64 and Apple ARM64. Experimental bundled builds expose Linux x86_64/aarch64 build configuration for CUDA, external CUTLASS, Triton AOT, and Vulkan, plus Apple ARM64 Metal and external MLX configuration. Accelerator features are build integration surfaces, not runtime-support claims. vllm.cpp is pinned at `34aedfbe8ed9779697905541a62e2160ccfd9c05`, which exposes C ABI version 10.
 
 ## Prerequisites
 
-Initial development and testing support Linux CPU builds. They require:
+Native builds require:
 
 - Rust and Cargo.
 - CMake 3.24 or newer.
@@ -62,18 +62,20 @@ cargo test --locked -p vllm-cpp --release --features serde
 just ci
 ```
 
-Set `CMAKE_BUILD_PARALLEL_LEVEL` to control native parallelism. The default bundled build remains deterministic and CPU-only: native tests, examples, the HTTP server, CUDA, Metal, MLX, Vulkan, Triton, and CUTLASS fetching are disabled explicitly. Use `nix develop .#msrv -c just msrv` for the exact local Rust 1.85.0 policy check; hosted exact-MSRV validation is deferred to a later CI slice.
+Set `CMAKE_BUILD_PARALLEL_LEVEL` to control native parallelism. The default bundled build remains deterministic and CPU-only: native tests, examples, the HTTP server, CUDA, Metal, MLX, Vulkan, Triton, and CUTLASS fetching are disabled explicitly. Use `nix develop .#msrv -c just msrv` for the exact local Rust 1.85.0 policy check; the manual `platforms` workflow runs the same exact toolchain policy.
 
 `build.rs` is consumer-only native build/link integration; it does not download dependencies or compile/execute the maintainer layout probe. Ordinary consumers do not need Just, bindgen, or libclang. Normal first-time Cargo dependency resolution may access crates.io; use Cargo's standard `--offline` mode after dependencies are cached.
 
 ## Experimental Backend Builds
 
-Backend features apply to bundled Linux x86_64/aarch64 builds only and are mutually exclusive with `system`; CUDA and Vulkan are also mutually exclusive. Backend features do not enable `bundled`: normal default-feature commands may use `--features cuda`, while `--no-default-features` callers must include it explicitly, for example `--features bundled,cuda`. Use a fresh `CARGO_TARGET_DIR` for every backend and link mode.
+Backend features are bundled-only and mutually exclusive with `system`; CUDA and Vulkan are also mutually exclusive. CUDA/CUTLASS/Triton/Vulkan target Linux x86_64/aarch64, while Metal/MLX require exact `aarch64-apple-darwin`. Backend features do not enable `bundled`: normal default-feature commands may use `--features cuda`, while `--no-default-features` callers must include it explicitly, for example `--features bundled,cuda`. Use a fresh `CARGO_TARGET_DIR` for every backend and link mode.
 
 - `cuda` requires `VLLM_CPP_CUDA_ARCHITECTURES` equal to `80`, `86`, `87`, `89`, `90a`, `100a`, `103a`, `110`, `120a`, `121a`, or `120a;121a`. Leave this variable unset when `cuda` is disabled, including CPU and system builds.
 - `cuda-cutlass` implies `cuda`, requires an explicit canonical `VLLM_CPP_CUTLASS_DIR` containing CUTLASS >=4.5.0, disables fetching, and rejects `103a` and `110`. Plain CUDA uses a nonexistent sentinel CUTLASS root so an ambient checkout cannot alter the build.
 - `triton-aot` implies `cuda`, enables only checked-in AOT artifacts for one of `80`, `86`, `89`, `90a`, `100a`, or `121a`, and forces regeneration off.
 - `vulkan` uses packaged Khronos headers and checked-in SPIR-V. It does not link a Vulkan SDK library; the native library opens the runtime loader dynamically.
+- `metal` enables the native Metal backend on Apple ARM64 and links Apple's `Metal` and `Foundation` frameworks. Its MSL is compiled at runtime.
+- `mlx` implies `metal` and requires canonical `MLX_ROOT` containing `include/mlx/array.h`, `lib/libmlx.dylib`, and `lib/mlx.metallib`. MLX remains an external dependency: Cargo neither fetches nor packages it and emits no machine-local rpath.
 
 For example:
 
@@ -88,11 +90,16 @@ VLLM_CPP_CUDA_ARCHITECTURES=120a \
 
 nix develop .#vulkan
 CARGO_TARGET_DIR=target/vulkan-static cargo build --locked --release --features vulkan
+
+# Apple ARM64 only
+CARGO_TARGET_DIR=target/metal-static cargo build --locked --release --features metal
+MLX_ROOT=/absolute/path/to/mlx CARGO_TARGET_DIR=target/mlx-static \
+  cargo build --locked --release --features mlx
 ```
 
-Static CUDA links the exact `cudart`, `cublasLt`, and, for Triton, CUDA driver locations selected by CMake. Dynamic builds rely on `libvllm.so` `DT_NEEDED` entries instead of repeating those transitive Cargo links; deploy the shared library and toolkit libraries through normal loader paths.
+Static CUDA links the exact `cudart`, `cublasLt`, and, for Triton, CUDA driver locations selected by CMake. Static Apple builds link `libc++`; Metal adds the `Metal` and `Foundation` frameworks, while MLX adds its canonical `lib` search path before `dylib=mlx`. Dynamic builds rely on the shared native library's transitive dependencies instead of repeating them through Cargo. Deploy `libvllm.so`/`libvllm.dylib` and optional toolkit/MLX libraries through normal loader paths.
 
-Compilation does not establish runtime correctness. Known native evidence blockers remain: CUDA teardown can SIGSEGV after otherwise successful tests; CUDA bf16 testing has a numerical tolerance failure; CUTLASS concurrent output differs from the non-concurrent path; Vulkan runtime coverage is incomplete. No runtime support is claimed here.
+Compilation does not establish runtime correctness. Known native evidence blockers remain: CUDA teardown can SIGSEGV after otherwise successful tests; CUDA bf16 testing has a numerical tolerance failure; CUTLASS concurrent output differs from the non-concurrent path; Vulkan attention/model runtime is incomplete; and MLX is an external, numerically distinct provider without release-lane model evidence. No accelerator runtime support is claimed here.
 
 ## Test Model and Sanitizers
 
@@ -138,9 +145,13 @@ The package gate validates deterministic inventories for both crates, package me
 
 `just publish-dry-run` performs a sys-then-safe workspace packaging dry-run without uploading; it uses `--no-verify` to avoid the pre-publication registry cycle. As required by [RELEASING.md](RELEASING.md), after `vllm-cpp-sys` is available from crates.io, run the full `cargo publish -p vllm-cpp --locked --dry-run` verification before publishing the safe crate.
 
+## Platform and Backend Validation
+
+The manual `platforms` workflow provides exact Rust 1.85.0, Linux ARM64 CPU, Apple ARM64 CPU, Apple ARM64 Metal compile/link, and Mesa llvmpipe Vulkan jobs without duplicating ordinary Linux x86_64 CPU CI. The Vulkan job requires a real llvmpipe device and `storageBuffer16BitAccess`, then runs native backend/op gates; its scope is backend/op checking, not attention or model-inference support. The hosted Metal job checks compile/link only, not runtime correctness.
+
 ## Support
 
-The supported runtime target is native Linux x86_64 CPU. Maintainer tests cover the four bundled/system static/dynamic CPU link modes plus bundled blocking and concurrent request inference with the pinned Qwen fixture. Sanitizer evidence covers native ASan/UBSan/leak detection and selected native-only GCC TSan lifecycle paths as described above. Linux CUDA/CUTLASS/Triton/Vulkan features remain experimental build-only surfaces with the limitations listed above; Apple and other accelerator targets are out of scope.
+The supported runtime target is native Linux x86_64 CPU. Maintainer tests cover the four bundled/system static/dynamic CPU link modes plus bundled blocking and concurrent request inference with the pinned Qwen fixture. Sanitizer evidence covers native ASan/UBSan/leak detection and selected native-only GCC TSan lifecycle paths as described above. The manual Linux ARM64 and Apple ARM64 CPU jobs are configured for model-free build/test coverage. CUDA/CUTLASS/Triton/Vulkan/Metal/MLX remain experimental surfaces with the evidence boundaries and limitations listed above; CPU is the only supported runtime family.
 
 ## Licensing and Affiliation
 

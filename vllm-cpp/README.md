@@ -37,18 +37,20 @@ The model argument is a directory understood by the pinned native engine, not a 
 | `cuda-cutlass` | Experimental CUDA build with a caller-provided CUTLASS >=4.5.0 tree |
 | `triton-aot` | Experimental CUDA build using checked-in Triton AOT artifacts |
 | `vulkan` | Experimental bundled Vulkan build configuration |
+| `metal` | Experimental native Metal build on Apple ARM64 |
+| `mlx` | Experimental external MLX provider on Apple ARM64; implies `metal` |
 
-`bundled` and `system` conflict. CUDA and Vulkan conflict, and accelerator features are bundled-only but do not implicitly enable `bundled` for `--no-default-features` builds. The workspace [backend documentation](https://github.com/querymt/vllm-cpp-rs#experimental-backend-builds) records exact environment variables, supported build architectures, and current blockers.
+`bundled` and `system` conflict. CUDA and Vulkan conflict, and accelerator features are bundled-only but do not implicitly enable `bundled` for `--no-default-features` builds. Metal/MLX require exact `aarch64-apple-darwin`; MLX additionally requires an external `MLX_ROOT` with its headers, dylib, and metallib. The workspace [backend documentation](https://github.com/querymt/vllm-cpp-rs#experimental-backend-builds) records exact environment variables, supported build architectures, and current blockers.
 
 ## ABI and deployment
 
 This crate is tied to the exact same `vllm-cpp-sys` crate version and the pinned vllm.cpp commit `34aedfbe8ed9779697905541a62e2160ccfd9c05`. Model loading requires exact C ABI version 10 before any versioned struct crosses FFI. A system library must implement the same ABI; the consumer build checks for its header, while maintainer conformance tests check layout and symbols.
 
-Static bundled builds include the native archive in the application link. Dynamic bundled or system builds do not deploy `libvllm.so`: install it and its backend/toolkit dependencies in a loader-visible location using `LD_LIBRARY_PATH`, rpath, or the system loader configuration. System mode uses `VLLM_CPP_ROOT`; `VLLM_CPP_LIB_DIR` can choose a nonstandard library directory. System static linking also requires the matching `libblake3_vendored.a` through `VLLM_CPP_BLAKE3_LIB_DIR` or the selected vllm library directory.
+Static bundled builds include the native archive in the application link. Dynamic bundled or system builds do not deploy `libvllm.so`/`libvllm.dylib`: install it and its backend/toolkit dependencies in a loader-visible location using `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, rpath supplied by the application, or the system loader configuration. System mode uses `VLLM_CPP_ROOT`; `VLLM_CPP_LIB_DIR` can choose a nonstandard library directory. System static linking also requires the matching `libblake3_vendored.a` through `VLLM_CPP_BLAKE3_LIB_DIR` or the selected vllm library directory.
 
 ## Support boundary
 
-The supported runtime tier is native Linux x86_64 CPU, covering bundled/system and static/dynamic link modes. Linux x86_64/aarch64 CUDA, external CUTLASS, Triton AOT, and Vulkan features are experimental build/configuration surfaces only. Known native blockers include CUDA teardown failure, CUDA bf16 numerical tolerance failure, CUTLASS concurrent-output differences, and incomplete Vulkan runtime coverage. Successful compilation is not a runtime-support claim.
+The supported runtime tier is native Linux x86_64 CPU, covering bundled/system and static/dynamic link modes. Linux ARM64 and Apple ARM64 CPU have manual hosted jobs configured for model-free build/test coverage. CUDA, external CUTLASS, Triton AOT, Vulkan, Metal, and MLX are experimental build/configuration surfaces. The hosted Metal job checks compilation/linking only; Vulkan software-device gates check backend/ops, not attention or model inference; MLX remains external and has no release-lane model/runtime evidence. Known native blockers include CUDA teardown failure, CUDA bf16 numerical tolerance failure, CUTLASS concurrent-output differences, incomplete Vulkan attention/model runtime, and MLX's numerically distinct provider behavior. CPU remains the only supported runtime family.
 
 See the repository [changelog](https://github.com/querymt/vllm-cpp-rs/blob/main/CHANGELOG.md), [release process](https://github.com/querymt/vllm-cpp-rs/blob/main/RELEASING.md), and [root support details](https://github.com/querymt/vllm-cpp-rs#support) for the current release boundary.
 

@@ -19,6 +19,25 @@ struct MockProbe {
 }
 
 impl MockProbe {
+    fn mlx() -> Self {
+        let mut probe = Self::default();
+        probe
+            .canonical
+            .insert(PathBuf::from("mlx"), PathBuf::from("/mlx"));
+        probe.dirs.insert(PathBuf::from("mlx"));
+        probe.dirs.insert(PathBuf::from("/mlx"));
+        for relative in [
+            "include/mlx/array.h",
+            "lib/libmlx.dylib",
+            "lib/mlx.metallib",
+        ] {
+            probe
+                .files
+                .insert(PathBuf::from("/mlx").join(relative), String::new());
+        }
+        probe
+    }
+
     fn cutlass(version: (u32, u32, u32)) -> Self {
         let mut probe = Self::default();
         probe
@@ -84,6 +103,31 @@ fn linux() -> Inputs {
     }
 }
 
+fn linux_arm64() -> Inputs {
+    let mut inputs = linux();
+    inputs.target = Target {
+        triple: "aarch64-unknown-linux-gnu".to_owned(),
+        os: "linux".to_owned(),
+        arch: "aarch64".to_owned(),
+    };
+    inputs
+}
+
+fn apple() -> Inputs {
+    Inputs {
+        features: Features {
+            bundled: true,
+            ..Features::default()
+        },
+        target: Target {
+            triple: "aarch64-apple-darwin".to_owned(),
+            os: "macos".to_owned(),
+            arch: "aarch64".to_owned(),
+        },
+        environment: Environment::default(),
+    }
+}
+
 fn error(inputs: &Inputs, probe: &MockProbe) -> String {
     plan(inputs, probe).unwrap_err().to_string()
 }
@@ -91,12 +135,20 @@ fn error(inputs: &Inputs, probe: &MockProbe) -> String {
 #[test]
 fn cpu_and_vulkan_plans_are_deterministic() {
     let cpu = plan(&linux(), &MockProbe::default()).unwrap();
+    let arm_cpu = plan(&linux_arm64(), &MockProbe::default()).unwrap();
+    assert_eq!(arm_cpu, cpu);
     assert!(cpu
         .cmake_defines
         .contains(&("VLLM_CPP_CUDA", "OFF".to_owned())));
     assert!(cpu
         .cmake_defines
         .contains(&("VLLM_CPP_VULKAN", "OFF".to_owned())));
+    assert!(cpu
+        .cmake_defines
+        .contains(&("VLLM_CPP_METAL", "OFF".to_owned())));
+    assert!(cpu
+        .cmake_defines
+        .contains(&("VLLM_CPP_MLX", "OFF".to_owned())));
     assert!(!cpu
         .cmake_defines
         .iter()
@@ -118,6 +170,139 @@ fn cpu_and_vulkan_plans_are_deterministic() {
     assert!(first
         .cmake_defines
         .contains(&("VLLM_CPP_VULKAN", "ON".to_owned())));
+}
+
+#[test]
+fn apple_cpu_metal_and_mlx_plans_are_deterministic() {
+    let cpu = plan(&apple(), &MockProbe::default()).unwrap();
+    assert_eq!(cpu.link_requirements, vec![LinkRequirement::Library("c++")]);
+    assert!(cpu
+        .cmake_defines
+        .contains(&("VLLM_CPP_METAL", "OFF".to_owned())));
+    assert!(cpu
+        .cmake_defines
+        .contains(&("VLLM_CPP_MLX", "OFF".to_owned())));
+
+    let mut metal = apple();
+    metal.features.metal = true;
+    let metal_plan = plan(&metal, &MockProbe::default()).unwrap();
+    assert!(metal_plan
+        .cmake_defines
+        .contains(&("VLLM_CPP_METAL", "ON".to_owned())));
+    assert!(metal_plan
+        .cmake_defines
+        .contains(&("VLLM_CPP_MLX", "OFF".to_owned())));
+    assert_eq!(
+        metal_plan.link_requirements,
+        vec![
+            LinkRequirement::Library("c++"),
+            LinkRequirement::Framework("Metal"),
+            LinkRequirement::Framework("Foundation"),
+        ]
+    );
+
+    let mut mlx = metal;
+    mlx.features.mlx = true;
+    mlx.environment.mlx_root = Some(PathBuf::from("mlx"));
+    let mlx_plan = plan(&mlx, &MockProbe::mlx()).unwrap();
+    assert!(mlx_plan
+        .cmake_defines
+        .contains(&("VLLM_CPP_MLX", "ON".to_owned())));
+    assert!(mlx_plan
+        .cmake_defines
+        .contains(&("MLX_ROOT", "/mlx".to_owned())));
+    assert_eq!(
+        mlx_plan.link_requirements,
+        vec![
+            LinkRequirement::Library("c++"),
+            LinkRequirement::Framework("Metal"),
+            LinkRequirement::Framework("Foundation"),
+            LinkRequirement::NativeSearch(PathBuf::from("/mlx/lib")),
+            LinkRequirement::Library("mlx"),
+        ]
+    );
+
+    mlx.features.dynamic_link = true;
+    let dynamic_mlx = plan(&mlx, &MockProbe::mlx()).unwrap();
+    assert!(dynamic_mlx.link_requirements.is_empty());
+    assert!(dynamic_mlx
+        .cmake_defines
+        .contains(&("MLX_ROOT", "/mlx".to_owned())));
+}
+
+#[test]
+fn mlx_validation_reports_each_configuration_error() {
+    let mut inputs = apple();
+    inputs.features.metal = true;
+    inputs.features.mlx = true;
+    assert_eq!(
+        error(&inputs, &MockProbe::default()),
+        format!(
+            "{ERROR_PREFIX} the `mlx` feature requires MLX_ROOT pointing to an existing MLX install; MLX is external and is never fetched or packaged"
+        )
+    );
+
+    inputs.environment.mlx_root = Some(PathBuf::from("mlx"));
+    assert_eq!(
+        error(&inputs, &MockProbe::default()),
+        format!("{ERROR_PREFIX} MLX_ROOT=mlx is not an existing directory")
+    );
+
+    let mut relative_probe = MockProbe::mlx();
+    relative_probe
+        .canonical
+        .insert(PathBuf::from("mlx"), PathBuf::from("canonical-mlx"));
+    assert!(error(&inputs, &relative_probe).contains("must resolve to an absolute path"));
+
+    for missing in [
+        "include/mlx/array.h",
+        "lib/libmlx.dylib",
+        "lib/mlx.metallib",
+    ] {
+        let mut probe = MockProbe::mlx();
+        probe.files.remove(&PathBuf::from("/mlx").join(missing));
+        assert_eq!(
+            error(&inputs, &probe),
+            format!("{ERROR_PREFIX} MLX_ROOT must contain {missing}; missing /mlx/{missing}")
+        );
+    }
+
+    let mut no_feature = apple();
+    no_feature.environment.mlx_root = Some(PathBuf::from("mlx"));
+    assert!(error(&no_feature, &MockProbe::mlx()).contains("feature is disabled"));
+}
+
+#[test]
+fn apple_backends_reject_other_targets_and_system_mode() {
+    for feature in ["metal", "mlx"] {
+        let mut inputs = linux();
+        inputs.features.metal = true;
+        inputs.features.mlx = feature == "mlx";
+        if inputs.features.mlx {
+            inputs.environment.mlx_root = Some(PathBuf::from("mlx"));
+        }
+        assert!(error(&inputs, &MockProbe::mlx()).contains("aarch64-apple-darwin"));
+    }
+
+    let mut apple_cuda = apple();
+    apple_cuda.features.cuda = true;
+    apple_cuda.environment.cuda_architectures = Some("80".to_owned());
+    assert!(error(&apple_cuda, &MockProbe::default())
+        .contains("`cuda` supports only Linux x86_64/aarch64 targets"));
+
+    let mut x86_macos = apple();
+    x86_macos.target = Target {
+        triple: "x86_64-apple-darwin".to_owned(),
+        os: "macos".to_owned(),
+        arch: "x86_64".to_owned(),
+    };
+    assert!(error(&x86_macos, &MockProbe::default()).contains("target x86_64-apple-darwin"));
+
+    let mut system_metal = apple();
+    system_metal.features.bundled = false;
+    system_metal.features.system = true;
+    system_metal.features.metal = true;
+    assert!(error(&system_metal, &MockProbe::default()).contains("bundled-only"));
 }
 
 #[test]
@@ -164,7 +349,7 @@ fn cuda_requires_arch_and_supported_target() {
         os: "windows".to_owned(),
         arch: "x86_64".to_owned(),
     };
-    assert!(error(&inputs, &MockProbe::default()).contains("only for Linux"));
+    assert!(error(&inputs, &MockProbe::default()).contains("target x86_64-pc-windows-msvc"));
 }
 
 #[test]
@@ -198,6 +383,13 @@ fn rejects_broken_feature_implications() {
     let mut triton = linux();
     triton.features.triton_aot = true;
     assert!(error(&triton, &MockProbe::default()).contains("requires the `cuda`"));
+
+    let mut mlx = apple();
+    mlx.features.mlx = true;
+    assert_eq!(
+        error(&mlx, &MockProbe::default()),
+        format!("{ERROR_PREFIX} `mlx` requires the `metal` feature")
+    );
 }
 
 #[test]

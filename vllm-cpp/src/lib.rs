@@ -30,12 +30,13 @@
 //! [`expected_abi_version`] before versioned structs cross FFI. The default
 //! `bundled` feature builds the pinned native source. `system` selects a
 //! caller-provided installation, `dynamic-link` selects shared linking, and
-//! `serde` adds typed JSON helpers. CUDA, CUTLASS, Triton AOT, and Vulkan features
-//! are experimental bundled build configuration.
+//! `serde` adds typed JSON helpers. CUDA, CUTLASS, Triton AOT, Vulkan, Metal, and
+//! external MLX features are experimental bundled build configuration.
 //!
-//! Dynamic linking does not deploy `libvllm.so`; applications must make it and
-//! its runtime dependencies visible through `LD_LIBRARY_PATH`, rpath, or system
-//! loader configuration. The supported runtime tier is native Linux x86_64 CPU.
+//! Dynamic linking does not deploy `libvllm.so` or `libvllm.dylib`; applications
+//! must make it and its runtime dependencies visible through the platform loader,
+//! such as `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, or an application-owned rpath.
+//! The supported runtime tier is native Linux x86_64 CPU.
 //! Accelerator features are build/configuration surfaces with known runtime
 //! blockers, not complete accelerator runtime support.
 

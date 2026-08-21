@@ -48,6 +48,8 @@ cuda = []
 cuda-cutlass = ["cuda"]
 triton-aot = ["cuda"]
 vulkan = []
+metal = []
+mlx = ["metal"]
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]

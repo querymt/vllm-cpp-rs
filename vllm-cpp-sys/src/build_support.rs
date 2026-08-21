@@ -3,8 +3,17 @@ use std::path::{Path, PathBuf};
 
 const LIB_DIR_CANDIDATES: [&str; 2] = ["lib64", "lib"];
 
-pub(crate) fn shared_library_name(stem: &str) -> String {
-    format!("lib{stem}.so")
+pub(crate) fn shared_library_name(stem: &str, target_os: &str) -> Result<String, String> {
+    let suffix = match target_os {
+        "linux" => ".so",
+        "macos" => ".dylib",
+        other => {
+            return Err(format!(
+                "shared libraries are unsupported for target OS {other}"
+            ))
+        }
+    };
+    Ok(format!("lib{stem}{suffix}"))
 }
 
 pub(crate) fn require_library_file(
