@@ -1,0 +1,38 @@
+[package]
+name = "vllm-cpp-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Raw Rust bindings and a bundled build for vllm.cpp"
+links = "vllm"
+build = "build.rs"
+include = [
+    "/build.rs",
+    "/src/**",
+    "/tests/**",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
+    "/NOTICE",
+    "/THIRD_PARTY.md",
+    "/vllm.cpp/CMakeLists.txt",
+    "/vllm.cpp/cmake/**",
+    "/vllm.cpp/include/**",
+    "/vllm.cpp/src/**",
+    "/vllm.cpp/third_party/blake3/**",
+    "/vllm.cpp/third_party/minja/**",
+    "/vllm.cpp/third_party/nlohmann/**",
+    "/vllm.cpp/LICENSE",
+    "/vllm.cpp/NOTICE",
+    "/vllm.cpp/third_party/README.md",
+]
+
+[features]
+default = ["bundled"]
+bundled = []
+
+[build-dependencies]
+cmake = "0.1.58"

@@ -1,0 +1,3 @@
+[submodule "vllm-cpp-sys/vllm.cpp"]
+	path = vllm-cpp-sys/vllm.cpp
+	url = https://github.com/mudler/vllm.cpp.git
