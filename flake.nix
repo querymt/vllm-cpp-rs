@@ -16,28 +16,110 @@
         pkgs = import inputs.nixpkgs {
           inherit system overlays;
         };
+        cudaPkgs = import inputs.nixpkgs {
+          inherit system overlays;
+          config.allowUnfree = true;
+        };
 
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
       in {
-        devShells.default = pkgs.mkShell {
-          packages = [
-            rustToolchain
-            pkgs.cmake
-            pkgs.git
-            pkgs.just
-            pkgs.jq
-            pkgs.ninja
-            pkgs.pkg-config
-            pkgs.gnutar
-            pkgs.llvmPackages.clang
-            pkgs.llvmPackages.bintools
-            pkgs.rust-bindgen
-          ];
+        devShells =
+          {
+            default = pkgs.mkShell {
+              packages = [
+                rustToolchain
+                pkgs.cmake
+                pkgs.git
+                pkgs.just
+                pkgs.jq
+                pkgs.ninja
+                pkgs.pkg-config
+                pkgs.gnutar
+                pkgs.llvmPackages.clang
+                pkgs.llvmPackages.bintools
+                pkgs.rust-bindgen
+              ];
 
-          shellHook = ''
-            export PS1="(dev:vllm-cpp-rs) $PS1"
-          '';
-        };
+              shellHook = ''
+                export PS1="(dev:vllm-cpp-rs) $PS1"
+              '';
+            };
+          }
+          // pkgs.lib.optionalAttrs
+          (builtins.elem system [
+            "x86_64-linux"
+            "aarch64-linux"
+          ]) {
+            cuda = let
+              toolkit = cudaPkgs.cudaPackages.cudatoolkit;
+              cutlass = cudaPkgs.cudaPackages.cutlass;
+            in
+              pkgs.mkShell {
+                packages = [
+                  rustToolchain
+                  pkgs.cmake
+                  pkgs.git
+                  pkgs.just
+                  pkgs.jq
+                  pkgs.ninja
+                  pkgs.pkg-config
+                  pkgs.gnutar
+                  pkgs.llvmPackages.clang
+                  pkgs.llvmPackages.bintools
+                  pkgs.rust-bindgen
+                  toolkit
+                  cutlass
+                ];
+
+                shellHook = ''
+                  export PS1="(cuda:vllm-cpp-rs) $PS1"
+                  export CUDA_PATH="${toolkit}"
+                  export CUDA_HOME="$CUDA_PATH"
+                  export CUDAToolkit_ROOT="$CUDA_PATH"
+                  export VLLM_CPP_CUTLASS_DIR="${cutlass.src}"
+                  if [ -d /run/opengl-driver/lib ]; then
+                    export LD_LIBRARY_PATH="/run/opengl-driver/lib:${toolkit}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                  else
+                    export LD_LIBRARY_PATH="${toolkit}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                  fi
+                '';
+              };
+
+            vulkan = let
+              vulkanLibraryPath = pkgs.lib.makeLibraryPath [
+                pkgs.vulkan-loader
+                pkgs.vulkan-validation-layers
+              ];
+            in
+              pkgs.mkShell {
+                packages = [
+                  rustToolchain
+                  pkgs.cmake
+                  pkgs.git
+                  pkgs.just
+                  pkgs.jq
+                  pkgs.ninja
+                  pkgs.pkg-config
+                  pkgs.gnutar
+                  pkgs.llvmPackages.clang
+                  pkgs.llvmPackages.bintools
+                  pkgs.rust-bindgen
+                  pkgs.vulkan-tools
+                  pkgs.vulkan-loader
+                  pkgs.vulkan-validation-layers
+                ];
+
+                shellHook = ''
+                  export PS1="(vulkan:vllm-cpp-rs) $PS1"
+                  if [ -d /run/opengl-driver/lib ]; then
+                    export LD_LIBRARY_PATH="/run/opengl-driver/lib:${vulkanLibraryPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                  else
+                    export LD_LIBRARY_PATH="${vulkanLibraryPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                  fi
+                  export VK_LAYER_PATH="${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d"
+                '';
+              };
+          };
       };
     };
 }

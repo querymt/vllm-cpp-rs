@@ -73,12 +73,28 @@ build-support-test:
       -o "$temp/build-support-tests"
     "$temp/build-support-tests"
 
+# Test the pure Linux backend build planner without configuring CMake.
+backend-config:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    temp=$(mktemp -d)
+    trap 'rm -rf "$temp"' EXIT
+    rustc --edition=2021 --test -D warnings \
+      {{ quote(root + "/vllm-cpp-sys/tests/build_config.rs") }} \
+      -o "$temp/build-config-tests"
+    "$temp/build-config-tests"
+
+# Verify pinned CUDA architecture mappings and vendored Triton AOT inputs.
+backend-integrity:
+    cd {{ quote(root) }} && cmake -P vllm-cpp-sys/vllm.cpp/cmake/CudaArchFeaturesTest.cmake
+    cd {{ quote(root) }} && bash vllm-cpp-sys/vllm.cpp/scripts/check-triton-aot-drift.sh
+
 # Run the focused C/Rust layout conformance test.
 layout-test:
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-{{ root }}/target/layout-test}" cargo test --locked -p vllm-cpp-sys --release --test layout
 
-# Run generated-binding, header, and layout conformance checks.
-sys: bindings-check header-check build-support-test layout-test
+# Run generated-binding, header, layout, and backend configuration conformance checks.
+sys: bindings-check header-check build-support-test backend-config backend-integrity layout-test
 
 # Test all Linux CPU link modes and the exact shared-library exports.
 link-modes:
@@ -368,10 +384,14 @@ package-test:
       README.md
       THIRD_PARTY.md
       build.rs
+      licenses/FLASH-ATTENTION-BSD-3-CLAUSE.txt
+      licenses/FLASH-LINEAR-ATTENTION-MIT.txt
       wrapper.h
       src/bindings.rs
+      src/build_config.rs
       src/build_support.rs
       src/lib.rs
+      tests/build_config.rs
       tests/build_support.rs
       tests/layout.c
       tests/layout.rs
@@ -385,11 +405,15 @@ package-test:
       vllm.cpp/src/capi/engine_handle.h
       vllm.cpp/src/capi/vllm_c.cpp
       vllm.cpp/src/vllm/version.cpp
+      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_121a/MANIFEST
+      vllm.cpp/scripts/triton-aot-compile.py
+      vllm.cpp/triton_kernels/chunk_delta_h.py
       vllm.cpp/third_party/README.md
       vllm.cpp/third_party/blake3/LICENSE_A2
       vllm.cpp/third_party/blake3/LICENSE_CC0
       vllm.cpp/third_party/minja/LICENSE
       vllm.cpp/third_party/nlohmann/json.hpp
+      vllm.cpp/third_party/vulkan/vulkan_core.h
     )
     for member in "${required_members[@]}"; do
       [[ -s $package_root/$member ]] || {
@@ -413,16 +437,19 @@ package-test:
       vllm.cpp/cmake
       vllm.cpp/include
       vllm.cpp/src
+      vllm.cpp/scripts/triton-aot-compile.py
+      vllm.cpp/triton_kernels
       vllm.cpp/third_party/README.md
       vllm.cpp/third_party/blake3
       vllm.cpp/third_party/minja
       vllm.cpp/third_party/nlohmann
+      vllm.cpp/third_party/vulkan
     )
     diff -u \
       <(native_inventory "$repo_root/vllm-cpp-sys" "${native_members[@]}") \
       <(native_inventory "$package_root" "${native_members[@]}")
     diff -u \
-      <(printf '%s\n' CMakeLists.txt LICENSE NOTICE cmake include src third_party | LC_ALL=C sort) \
+      <(printf '%s\n' CMakeLists.txt LICENSE NOTICE cmake include scripts src third_party triton_kernels | LC_ALL=C sort) \
       <(find "$package_root/vllm.cpp" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
     denied_members=(
       Justfile
@@ -434,13 +461,10 @@ package-test:
       vllm.cpp/benchmarks
       vllm.cpp/docs
       vllm.cpp/examples
-      vllm.cpp/scripts
       vllm.cpp/tests
       vllm.cpp/tools
-      vllm.cpp/triton_kernels
       vllm.cpp/third_party/doctest
       vllm.cpp/third_party/httplib
-      vllm.cpp/third_party/vulkan
     )
     for member in "${denied_members[@]}"; do
       [[ ! -e $package_root/$member ]] || {

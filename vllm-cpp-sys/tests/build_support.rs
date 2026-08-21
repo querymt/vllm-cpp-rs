@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use build_support::{find_installed_library_dir, require_library_file, shared_library_name};
+use build_support::{
+    cmake_cache_path, find_installed_library_dir, require_library_file, shared_library_name,
+};
 
 struct TempDir {
     path: PathBuf,
@@ -37,11 +39,15 @@ impl Drop for TempDir {
     }
 }
 
-fn write_file(path: &Path) {
+fn write_contents(path: &Path, contents: &[u8]) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("failed to create parent directory");
     }
-    fs::write(path, b"archive").expect("failed to write test artifact");
+    fs::write(path, contents).expect("failed to write test artifact");
+}
+
+fn write_file(path: &Path) {
+    write_contents(path, b"archive");
 }
 
 #[test]
@@ -129,4 +135,48 @@ fn require_library_file_reports_the_expected_path() {
             .display()
             .to_string()
     ));
+}
+
+#[test]
+fn cmake_cache_path_requires_one_nonempty_absolute_value() {
+    let temp = TempDir::new("cmake-cache-errors");
+    let cache = temp.path().join("CMakeCache.txt");
+
+    write_contents(&cache, b"OTHER:FILEPATH=/tmp/libother.so\n");
+    let error = cmake_cache_path(&cache, "CUDA_CUDART").expect_err("key should be absent");
+    assert!(error.contains("CUDA_CUDART is absent"));
+
+    write_contents(&cache, b"CUDA_CUDART:FILEPATH=\n");
+    let error = cmake_cache_path(&cache, "CUDA_CUDART").expect_err("value should be empty");
+    assert!(error.contains("CUDA_CUDART is empty"));
+
+    write_contents(&cache, b"CUDA_CUDART:FILEPATH=CUDA_CUDART-NOTFOUND\n");
+    let error = cmake_cache_path(&cache, "CUDA_CUDART").expect_err("value should be unresolved");
+    assert!(error.contains("CUDA_CUDART is unresolved"));
+
+    write_contents(&cache, b"CUDA_CUDART:FILEPATH=libcudart.so\n");
+    let error = cmake_cache_path(&cache, "CUDA_CUDART").expect_err("value should be relative");
+    assert!(error.contains("must be an absolute path"));
+
+    write_contents(
+        &cache,
+        b"CUDA_CUDART:FILEPATH=/cuda/lib/libcudart.so\nCUDA_CUDART:STRING=/other/libcudart.so\n",
+    );
+    let error = cmake_cache_path(&cache, "CUDA_CUDART").expect_err("key should be duplicated");
+    assert!(error.contains("occurs more than once"));
+}
+
+#[test]
+fn cmake_cache_path_returns_the_exact_absolute_value() {
+    let temp = TempDir::new("cmake-cache-valid");
+    let cache = temp.path().join("CMakeCache.txt");
+    write_contents(
+        &cache,
+        b"CUDA_cublasLt_LIBRARY:FILEPATH=/nix/store/toolkit/lib/libcublasLt.so\n",
+    );
+
+    assert_eq!(
+        cmake_cache_path(&cache, "CUDA_cublasLt_LIBRARY").unwrap(),
+        PathBuf::from("/nix/store/toolkit/lib/libcublasLt.so")
+    );
 }
