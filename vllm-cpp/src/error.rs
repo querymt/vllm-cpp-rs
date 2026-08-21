@@ -25,6 +25,10 @@ pub enum Error {
     PathEncoding,
     /// Native code returned bytes that are not valid UTF-8.
     InvalidUtf8 { field: &'static str },
+    /// An asynchronous callback panicked.
+    CallbackPanicked,
+    /// A request operation was attempted from that request's callback thread.
+    RequestCallbackThread { operation: &'static str },
     /// A Rust-side parameter cannot be represented by the native API.
     InvalidConfiguration { message: String },
     /// JSON serialization or parsing failed.
@@ -53,6 +57,13 @@ impl fmt::Display for Error {
             Self::InteriorNul { field } => write!(f, "{field} contains an interior NUL byte"),
             Self::PathEncoding => write!(f, "path cannot be represented by the native API"),
             Self::InvalidUtf8 { field } => write!(f, "native {field} is not valid UTF-8"),
+            Self::CallbackPanicked => write!(f, "asynchronous request callback panicked"),
+            Self::RequestCallbackThread { operation } => {
+                write!(
+                    f,
+                    "cannot {operation} a request from its own callback thread"
+                )
+            }
             Self::InvalidConfiguration { message } => {
                 write!(f, "invalid configuration: {message}")
             }

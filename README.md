@@ -3,11 +3,11 @@
 Rust bindings for [vllm.cpp](https://github.com/mudler/vllm.cpp), organized as:
 
 - `vllm-cpp-sys`: raw C API bindings and the pinned native source build.
-- `vllm-cpp`: the application-facing safe blocking API.
+- `vllm-cpp`: the application-facing safe inference API.
 
 ## Status
 
-The safe crate provides an owned blocking engine API for model loading, completion, streaming, structured output, and raw-JSON chat. An optional `serde` feature adds `serde_json::Value` chat helpers. The sys crate provides checked-in generated FFI declarations with C/Rust layout checks and coverage for all 19 exported C symbols.
+The safe crate provides a cloneable engine API for model loading, blocking completion and streaming, non-blocking concurrent requests, structured output, and raw-JSON chat. An optional `serde` feature adds `serde_json::Value` chat helpers. The sys crate provides checked-in generated FFI declarations with C/Rust layout checks and coverage for all 19 exported C symbols.
 
 Linux x86_64 CPU builds support bundled static, bundled dynamic, system static, and system dynamic linking. vllm.cpp is pinned at `34aedfbe8ed9779697905541a62e2160ccfd9c05`, which exposes C ABI version 10.
 
@@ -39,26 +39,33 @@ git submodule update --init --recursive
 ## Safe API
 
 ```rust
-use vllm_cpp::{Engine, SamplingParams};
+use vllm_cpp::{Engine, SamplingParams, StreamControl};
 
 let engine = Engine::load("/models/Qwen3-0.6B")?;
-let completion = engine.complete(
-    "The capital of France is",
-    &SamplingParams::greedy().max_tokens(16),
-)?;
+let params = SamplingParams::greedy().max_tokens(16);
+let completion = engine.complete("The capital of France is", &params)?;
 println!("{}", completion.text);
+
+let mut request = engine.submit("The capital of Germany is", &params, |event| {
+    print!("{}", event.delta);
+    StreamControl::Continue
+})?;
+println!("{:?}", request.wait()?);
 # Ok::<(), vllm_cpp::Error>(())
 ```
 
 `EngineBuilder` owns model settings and converts them to temporary C strings only for the load call. `SamplingParams` owns stop strings and structured constraints. Completion and chat strings are copied into Rust values before the matching native free function runs.
 
-Blocking streaming callbacks receive copied UTF-8 deltas. Callback panics are caught before the C boundary and resumed only after the native call has stopped and returned. Chat methods accept raw OpenAI-compatible request JSON; enable `serde` for `serde_json::Value` request and response helpers.
+`Engine` is `Clone + Send + Sync`; each `Request` retains the shared engine until native callback delivery has joined. A request is `Send` but deliberately not `Sync`. `submit` returns before generation finishes, and `Request` provides `is_done`, idempotent `cancel`, `wait`, and copied `native_error` diagnostics. `wait` classifies completion as `Completed`, `StoppedByCallback`, or `Cancelled`; an explicit asynchronous `Stop` is classified as `StoppedByCallback` even when returned for the terminal event.
+
+All streaming callbacks receive copied UTF-8 deltas. Blocking callbacks may borrow stack data; their panics are caught before the C boundary and resumed only after the native call returns. Asynchronous callbacks must be `Send + 'static`, run on a native delivery thread, and report panic as `Error::CallbackPanicked` from `wait`. Waiting for or freeing a request from its own callback thread is prohibited by ABI v10: `wait` returns `Error::RequestCallbackThread`, while drop transfers cleanup to a prestarted reaper that owns the request, callback, and engine until native free/cancel/join completes. Chat methods accept raw OpenAI-compatible request JSON; enable `serde` for `serde_json::Value` request and response helpers.
 
 Run the practical examples with a model directory:
 
 ```console
 cargo run -p vllm-cpp --example complete -- <model-directory>
 cargo run -p vllm-cpp --example stream -- <model-directory>
+cargo run -p vllm-cpp --example concurrent -- <model-directory>
 cargo run -p vllm-cpp --example chat -- <model-directory>
 cargo run -p vllm-cpp --example structured -- <model-directory>
 ```
@@ -80,7 +87,7 @@ Set `CMAKE_BUILD_PARALLEL_LEVEL` to control native parallelism. The bundled buil
 
 ## Test Model and Sanitizers
 
-Model-backed tests use Apache-2.0 `Qwen/Qwen3-0.6B` at pinned revision `c1899de289a04d12100db370d81485cdf75e47ca`. Download or reuse the cache and verify every file, then run exactly the six blocking model tests serially:
+Model-backed tests use Apache-2.0 `Qwen/Qwen3-0.6B` at pinned revision `c1899de289a04d12100db370d81485cdf75e47ca`. Download or reuse the cache and verify every file, then run exactly 14 blocking and request-lifecycle model tests serially:
 
 ```console
 model=$(just setup-test-model)
@@ -90,10 +97,11 @@ VLLM_CPP_TEST_MODEL="$model" \
 
 The approximately 1.5 GB model stays in the user cache and is not included in repository or crate packages. Model-backed tests skip with an explanatory message when `VLLM_CPP_TEST_MODEL` is unset. When it is set, the test helper and sanitizer gate require `model.safetensors`, `config.json`, `tokenizer.json`, and `tokenizer_config.json` and report every missing file.
 
-Address, undefined-behavior, and leak checks run the blocking safe API and six model tests with native instrumentation:
+AddressSanitizer, UndefinedBehaviorSanitizer, and leak detection run the full safe/request/model suites with native instrumentation. The Linux x86_64 GCC ThreadSanitizer lane runs selected request lifecycle tests individually and instruments native C++ only; it does not claim race coverage for Rust or the Rust standard library. Callback-thread self-drop remains in the normal and ASan/leak suites because its handoff uses uninstrumented Rust synchronization.
 
 ```console
 just sanitizers "$model"
+just tsan "$model"
 ```
 
 `VLLM_CPP_SANITIZE` is a bundled-build test input. System mode rejects it because Cargo cannot infer whether an externally built native library carries matching instrumentation.
@@ -121,7 +129,7 @@ The package gate preserves the sys crate inventory, tests the extracted sys crat
 
 ## Support
 
-The supported target is native Linux x86_64 CPU. Maintainer tests cover the four bundled/system static/dynamic link modes and bundled blocking inference with the pinned Qwen fixture. Other operating systems, architectures, and accelerator builds are not supported by this Rust build.
+The supported target is native Linux x86_64 CPU. Maintainer tests cover the four bundled/system static/dynamic link modes plus bundled blocking and concurrent request inference with the pinned Qwen fixture. Sanitizer evidence covers native ASan/UBSan/leak detection and selected native-only GCC TSan lifecycle paths as described above. Other operating systems, architectures, and accelerator builds are not supported by this Rust build.
 
 ## Licensing and Affiliation
 

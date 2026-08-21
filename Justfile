@@ -577,7 +577,7 @@ setup-test-model destination=env_var_or_default("VLLM_CPP_TEST_MODEL", env_var_o
     (cd "$destination" && sha256sum --check SHA256SUMS.expected) >&2
     printf '%s\n' "$destination"
 
-# Run the blocking safe API and Qwen model suites with ASan, UBSan, and leak detection.
+# Run the full safe/request/model suites with ASan, UBSan, and leak detection.
 sanitizers model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
     #!/usr/bin/env bash
     set -euo pipefail
@@ -629,6 +629,74 @@ sanitizers model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
         exit 1
       fi
       "$binary" --test-threads=1
+    done
+
+# Run selected request lifecycle tests under native-only GCC TSan on Linux x86_64.
+tsan model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
+      echo 'GCC TSan validation is supported only on Linux x86_64' >&2
+      exit 1
+    fi
+    model={{ quote(model) }}
+    if [[ -z $model ]]; then
+      echo 'set VLLM_CPP_TEST_MODEL or pass model=<verified-model-directory>' >&2
+      exit 1
+    fi
+    required_model_files=(
+      model.safetensors
+      config.json
+      tokenizer.json
+      tokenizer_config.json
+    )
+    missing=()
+    for file in "${required_model_files[@]}"; do
+      [[ -f $model/$file ]] || missing+=("$file")
+    done
+    if ((${#missing[@]})); then
+      printf 'model fixture is incomplete at %s; missing:' "$model" >&2
+      printf ' %s' "${missing[@]}" >&2
+      printf '\n' >&2
+      exit 1
+    fi
+    cd {{ quote(root) }}
+    export VLLM_CPP_TEST_MODEL="$model"
+    export VLLM_CPP_TEST_ISOLATED_ENGINE=1
+    export VLLM_CPP_SANITIZE=thread
+    export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-{{ quote(root + "/target/tsan") }}}
+
+    cargo test --locked -p vllm-cpp --test qwen3 --no-run
+
+    tsan=$(gcc -print-file-name=libtsan.so)
+    if [[ ! -f $tsan ]]; then
+      echo 'GCC ThreadSanitizer runtime is unavailable' >&2
+      exit 1
+    fi
+    export LD_PRELOAD="$tsan${LD_PRELOAD:+:$LD_PRELOAD}"
+    # Rust and its standard library are not instrumented in this GCC lane. Keep
+    # native vllm.cpp races visible while ignoring uninstrumented Rust modules.
+    export TSAN_OPTIONS=${TSAN_OPTIONS:-halt_on_error=1:ignore_noninstrumented_modules=1}
+    export VT_POOL_BYPASS=1
+
+    binary=$(find "$CARGO_TARGET_DIR/debug/deps" -maxdepth 1 -type f \
+      -name 'qwen3-*' -executable -printf '%T@ %p\n' \
+      | sort -n | tail -1 | cut -d' ' -f2-) || true
+    if [[ -z $binary ]]; then
+      echo 'could not find qwen3 test binary' >&2
+      exit 1
+    fi
+    # Self-drop uses uninstrumented Rust synchronization, so normal and ASan/LSan
+    # cover it. Every selected native lifecycle case runs in its own process.
+    for test in \
+      concurrent_requests_batch_with_correct_output \
+      engine_clones_submit_and_wait_from_multiple_rust_threads \
+      live_request_moves_to_rust_thread_for_cancel_wait_and_drop \
+      request_outcomes_and_probes_are_precise \
+      callback_panic_is_reported_and_engine_is_reusable \
+      request_retains_engine_and_live_drop_is_safe \
+      concurrent_request_lifecycle_stress; do
+      "$binary" "$test" --exact --test-threads=1
     done
 
 # Check Just and Rust formatting.
