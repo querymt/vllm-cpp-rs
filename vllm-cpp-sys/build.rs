@@ -16,6 +16,7 @@ const RERUN_ENV: &[&str] = &[
     "VLLM_CPP_ROOT",
     "VLLM_CPP_LIB_DIR",
     "VLLM_CPP_BLAKE3_LIB_DIR",
+    "VLLM_CPP_SANITIZE",
     "CC",
     "CFLAGS",
     "CXX",
@@ -55,15 +56,17 @@ fn main() {
         panic!("linking is implemented only for Linux, not {target_os}");
     }
 
+    let sanitizer = sanitizer_config(bundled);
     let system_root = system.then(validate_system_root);
     if bundled {
-        build_bundled();
+        build_bundled(sanitizer.as_deref());
     } else {
         link_system(system_root.as_deref().expect("system root was validated"));
     }
+    link_sanitizer_runtimes(sanitizer.as_deref());
 }
 
-fn build_bundled() {
+fn build_bundled(sanitizer: Option<&str>) {
     let source = Path::new("vllm.cpp");
     if !source.join("CMakeLists.txt").is_file() {
         panic!(
@@ -84,7 +87,7 @@ fn build_bundled() {
         .define("VLLM_CPP_TRITON", "OFF")
         .define("VLLM_CPP_TRITON_REGEN", "OFF")
         .define("VLLM_CPP_CUTLASS_FETCH", "OFF")
-        .define("VLLM_CPP_SANITIZE", "OFF");
+        .define("VLLM_CPP_SANITIZE", sanitizer.unwrap_or("OFF"));
 
     let dynamic_link = cfg!(feature = "dynamic-link");
     let vllm_artifact = if dynamic_link {
@@ -216,6 +219,38 @@ fn system_library_dir(root: &Path, expected_artifact: &str) -> PathBuf {
             root.display()
         )
     })
+}
+
+fn sanitizer_config(bundled: bool) -> Option<String> {
+    let value = env::var_os("VLLM_CPP_SANITIZE")?;
+    let value = value
+        .into_string()
+        .unwrap_or_else(|_| panic!("VLLM_CPP_SANITIZE must be valid UTF-8"));
+    if value == "OFF" {
+        return None;
+    }
+    if !bundled {
+        panic!("VLLM_CPP_SANITIZE is supported only for bundled builds");
+    }
+    match value.as_str() {
+        "address" | "undefined" | "address,undefined" => Some(value),
+        "thread" => panic!("thread sanitization is not part of the blocking API test lane"),
+        _ => panic!(
+            "unsupported VLLM_CPP_SANITIZE value `{value}`; expected OFF, address, undefined, or address,undefined"
+        ),
+    }
+}
+
+fn link_sanitizer_runtimes(sanitizer: Option<&str>) {
+    let Some(sanitizer) = sanitizer else {
+        return;
+    };
+    if sanitizer.split(',').any(|name| name == "address") {
+        println!("cargo:rustc-link-lib=dylib=asan");
+    }
+    if sanitizer.split(',').any(|name| name == "undefined") {
+        println!("cargo:rustc-link-lib=dylib=ubsan");
+    }
 }
 
 fn link_platform_dependencies() {
