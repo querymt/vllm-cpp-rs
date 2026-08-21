@@ -1,8 +1,10 @@
 # vllm-cpp-sys
 
-Raw Rust bindings and native linking for [vllm.cpp](https://github.com/mudler/vllm.cpp).
+Raw Rust bindings and native linking for the stable C API of [vllm.cpp](https://github.com/mudler/vllm.cpp).
 
-This crate exposes generated unsafe functions that mirror the stable C API. Applications should use the application-facing `vllm-cpp` bindings when implemented. Ordinary consumers do not need Just, bindgen, or libclang.
+This crate exposes checked-in generated unsafe declarations for the 19 exported C symbols in ABI version 10. Callers are responsible for pointer validity, lifetimes, callback threading, status/error handling, and matching every native allocation with its documented free function. Applications should prefer the current safe [`vllm-cpp`](https://docs.rs/vllm-cpp) crate unless they require direct ABI access. Ordinary consumers do not need Just, bindgen, or libclang.
+
+The package contains Rust declarations and conformance tests, native build/link integration, the pinned native source inputs required by the supported feature set, and their licenses/notices. It excludes upstream tests, fixtures, models, examples, benchmarks, agent records, fetched SDKs, external CUTLASS trees, and build output. See the repository [changelog](https://github.com/querymt/vllm-cpp-rs/blob/main/CHANGELOG.md) and [release process](https://github.com/querymt/vllm-cpp-rs/blob/main/RELEASING.md) for the coordinated crate boundary.
 
 ## Link Modes
 
@@ -35,7 +37,7 @@ These features do not claim runtime support. Known native blockers remain: a CUD
 
 ## Generated Bindings
 
-The bundled source is pinned to commit `34aedfbe8ed9779697905541a62e2160ccfd9c05` and exposes C ABI version 10. Bindings are generated with bindgen 0.72.1 from `wrapper.h`, which includes `vllm.cpp/include/vllm.h`, and committed to `src/bindings.rs`. Maintainers use Just 1.40 or newer from the repository root:
+The bundled source is pinned to commit `34aedfbe8ed9779697905541a62e2160ccfd9c05` and exposes C ABI version 10. Bindings are generated with bindgen 0.72.1 from `wrapper.h`, which includes `vllm.cpp/include/vllm.h`, and committed to `src/bindings.rs`. The exported stable C boundary is narrower than the broader native C++ implementation; these declarations do not promise access to undocumented internals. Maintainers use Just 1.40 or newer from the repository root:
 
 ```console
 just bindings

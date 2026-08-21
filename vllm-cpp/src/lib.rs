@@ -1,9 +1,43 @@
-//! Safe Rust bindings for the stable vllm.cpp C API.
+//! Safe model inference API for the stable vllm.cpp C boundary.
 //!
-//! [`Engine`] is a cloneable, shared owner of a complete native serving stack.
-//! It provides blocking completion, streaming, and chat methods plus
-//! [`Engine::submit`] for non-blocking requests. Each [`Request`] retains the
-//! engine until native request free/join completes.
+//! # Entry points
+//!
+//! Create an [`Engine`] with [`Engine::load`] or configure native model settings
+//! through [`EngineBuilder`]. [`SamplingParams`] owns sampling, stop-string, and
+//! [`StructuredOutput`] settings for completion calls. The engine provides
+//! blocking completion, streaming, raw-JSON chat, and [`Engine::submit`] for a
+//! concurrent [`Request`]. Enable `serde` for `serde_json::Value` chat helpers.
+//!
+//! # Ownership and callbacks
+//!
+//! [`Engine`] is a cloneable RAII owner; clones share one reference-counted
+//! native engine. Rust copies completion, stream, chat, and error text before
+//! native storage is freed or reused. Blocking callbacks may borrow caller data.
+//! Their panics are caught before the C boundary and resumed after the native
+//! call returns.
+//!
+//! A [`Request`] retains its engine and asynchronous callback until native
+//! free/join completes. Requests are `Send` but intentionally not `Sync`, while
+//! engines are `Send + Sync`. Asynchronous callbacks run on a native delivery
+//! thread, must be `Send + 'static`, and surface panic through
+//! [`Error::CallbackPanicked`]. ABI version 10 forbids waiting for or freeing a
+//! request from its callback thread; callback-thread drop delegates ownership to
+//! a cleanup reaper instead.
+//!
+//! # ABI, linking, and deployment
+//!
+//! Engine loading requires the linked native library's ABI to equal
+//! [`expected_abi_version`] before versioned structs cross FFI. The default
+//! `bundled` feature builds the pinned native source. `system` selects a
+//! caller-provided installation, `dynamic-link` selects shared linking, and
+//! `serde` adds typed JSON helpers. CUDA, CUTLASS, Triton AOT, and Vulkan features
+//! are experimental bundled build configuration.
+//!
+//! Dynamic linking does not deploy `libvllm.so`; applications must make it and
+//! its runtime dependencies visible through `LD_LIBRARY_PATH`, rpath, or system
+//! loader configuration. The supported runtime tier is native Linux x86_64 CPU.
+//! Accelerator features are build/configuration surfaces with known runtime
+//! blockers, not complete accelerator runtime support.
 
 mod callback;
 mod engine;

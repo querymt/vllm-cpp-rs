@@ -28,6 +28,7 @@ This repository provides a Nix development shell with the pinned development too
 nix develop
 nix develop .#cuda
 nix develop .#vulkan
+nix develop .#msrv
 ```
 
 ## Checkout
@@ -40,21 +41,7 @@ git submodule update --init --recursive
 
 ## Safe API
 
-```rust
-use vllm_cpp::{Engine, SamplingParams, StreamControl};
-
-let engine = Engine::load("/models/Qwen3-0.6B")?;
-let params = SamplingParams::greedy().max_tokens(16);
-let completion = engine.complete("The capital of France is", &params)?;
-println!("{}", completion.text);
-
-let mut request = engine.submit("The capital of Germany is", &params, |event| {
-    print!("{}", event.delta);
-    StreamControl::Continue
-})?;
-println!("{:?}", request.wait()?);
-# Ok::<(), vllm_cpp::Error>(())
-```
+The packaged [`vllm-cpp` guide](vllm-cpp/README.md) covers model requirements, safe ownership, callbacks, concurrency, features, link modes, and deployment. The [`vllm-cpp-sys` guide](vllm-cpp-sys/README.md) documents the raw ABI and native build boundary.
 
 `EngineBuilder` owns model settings and converts them to temporary C strings only for the load call. `SamplingParams` owns stop strings and structured constraints. Completion and chat strings are copied into Rust values before the matching native free function runs.
 
@@ -62,7 +49,7 @@ println!("{:?}", request.wait()?);
 
 All streaming callbacks receive copied UTF-8 deltas. Blocking callbacks may borrow stack data; their panics are caught before the C boundary and resumed only after the native call returns. Asynchronous callbacks must be `Send + 'static`, run on a native delivery thread, and report panic as `Error::CallbackPanicked` from `wait`. Waiting for or freeing a request from its own callback thread is prohibited by ABI v10: `wait` returns `Error::RequestCallbackThread`, while drop transfers cleanup to a prestarted reaper that owns the request, callback, and engine until native free/cancel/join completes. Chat methods accept raw OpenAI-compatible request JSON; enable `serde` for `serde_json::Value` request and response helpers.
 
-See [the examples guide](vllm-cpp/examples/README.md) for ordinary Linux and optional Nix setup and commands for every example.
+See [the examples guide](vllm-cpp/examples/README.md) for ordinary Linux and optional Nix setup and commands for every example. Release-facing changes are recorded in the [changelog](CHANGELOG.md), and maintainers use the manual [release process](RELEASING.md).
 
 ## Build and Test
 
@@ -75,7 +62,7 @@ cargo test --locked -p vllm-cpp --release --features serde
 just ci
 ```
 
-Set `CMAKE_BUILD_PARALLEL_LEVEL` to control native parallelism. The default bundled build remains deterministic and CPU-only: native tests, examples, the HTTP server, CUDA, Metal, MLX, Vulkan, Triton, and CUTLASS fetching are disabled explicitly.
+Set `CMAKE_BUILD_PARALLEL_LEVEL` to control native parallelism. The default bundled build remains deterministic and CPU-only: native tests, examples, the HTTP server, CUDA, Metal, MLX, Vulkan, Triton, and CUTLASS fetching are disabled explicitly. Use `nix develop .#msrv -c just msrv` for the exact local Rust 1.85.0 policy check; hosted exact-MSRV validation is deferred to a later CI slice.
 
 `build.rs` is consumer-only native build/link integration; it does not download dependencies or compile/execute the maintainer layout probe. Ordinary consumers do not need Just, bindgen, or libclang. Normal first-time Cargo dependency resolution may access crates.io; use Cargo's standard `--offline` mode after dependencies are cached.
 
@@ -147,7 +134,9 @@ cargo package -p vllm-cpp --locked --list
 just package-test
 ```
 
-The package gate preserves the sys crate inventory, tests the extracted sys crate and downstream fixture offline, then points the extracted safe crate at the extracted sys crate and tests it offline with `bundled,serde`. It also rejects local paths, build output, and model files in the safe package. The sys package carries only native build inputs and required licenses/notices; upstream tests, large fixtures, media, benchmarks, and agent records are excluded.
+The package gate validates deterministic inventories for both crates, package metadata, required source/docs/examples/tests/licenses/native inputs, forbidden payloads, and license provenance. It extracts and tests both crates offline, then runs independent sys and safe downstream consumers; the safe consumer resolves both extracted crates rather than this workspace. The sys package carries only native build inputs and required licenses/notices; upstream tests, large fixtures, media, benchmarks, fetched SDKs, external CUTLASS trees, and agent records are excluded.
+
+`just publish-dry-run` performs a sys-then-safe workspace packaging dry-run without uploading; it uses `--no-verify` to avoid the pre-publication registry cycle. As required by [RELEASING.md](RELEASING.md), after `vllm-cpp-sys` is available from crates.io, run the full `cargo publish -p vllm-cpp --locked --dry-run` verification before publishing the safe crate.
 
 ## Support
 

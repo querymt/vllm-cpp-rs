@@ -1,7 +1,36 @@
-//! Raw bindings to the stable vllm.cpp C API.
+//! Raw FFI declarations for the stable vllm.cpp C API.
 //!
-//! This crate exposes checked-in generated unsafe FFI declarations. Applications
-//! should use the application-facing `vllm-cpp` bindings when implemented.
+//! The checked-in bindings are generated from `vllm.cpp/include/vllm.h` and
+//! expose that header's 19-symbol C boundary, versioned structs, constants, and
+//! callback signatures. They target ABI version 10 from pinned vllm.cpp commit
+//! `34aedfbe8ed9779697905541a62e2160ccfd9c05`. This exported ABI is narrower than
+//! the broader native C++ implementation and does not expose undocumented
+//! vllm.cpp internals.
+//!
+//! # Safety
+//!
+//! The declarations are intentionally raw. Callers must uphold every pointer,
+//! lifetime, aliasing, thread, callback, and NUL-termination contract from the C
+//! header. They must check returned status values, copy thread-local error text
+//! before another API call on that thread, and release engines, requests,
+//! completions, and allocated strings with their matching `vllm_*_free`
+//! functions. In particular, ABI version 10 prohibits waiting for or freeing a
+//! request from that request's callback thread. Prefer the safe `vllm-cpp` crate
+//! unless direct ABI access is required.
+//!
+//! # Build and link modes
+//!
+//! The default `bundled` feature compiles and statically links the packaged
+//! pinned source. `system` links a caller-provided compatible installation, and
+//! `dynamic-link` selects `libvllm.so` in either source mode. Dynamic consumers
+//! must deploy the shared library and dependencies through the platform loader.
+//! CUDA, external CUTLASS, Triton AOT, and Vulkan features are experimental
+//! bundled build configuration and require their documented native inputs.
+//!
+//! Native Linux x86_64 CPU is the supported runtime tier. Building the bundled
+//! source requires CMake 3.24 or newer, a build tool, C11 and C++20 compilers,
+//! and a linker/C++ standard library. Documentation builds skip native
+//! compilation; that does not validate a runtime library or accelerator.
 
 #![allow(non_camel_case_types, non_upper_case_globals)]
 

@@ -22,6 +22,9 @@
         };
 
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        msrvToolchain = pkgs.rust-bin.stable."1.85.0".default.override {
+          extensions = ["clippy" "rustfmt"];
+        };
       in {
         devShells =
           {
@@ -42,6 +45,22 @@
 
               shellHook = ''
                 export PS1="(dev:vllm-cpp-rs) $PS1"
+              '';
+            };
+
+            msrv = pkgs.mkShell {
+              packages = [
+                msrvToolchain
+                pkgs.cmake
+                pkgs.just
+                pkgs.ninja
+                pkgs.pkg-config
+                pkgs.llvmPackages.clang
+                pkgs.llvmPackages.bintools
+              ];
+
+              shellHook = ''
+                export PS1="(msrv:vllm-cpp-rs) $PS1"
               '';
             };
           }

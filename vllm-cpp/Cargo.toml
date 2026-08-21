@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Safe Rust bindings for vllm.cpp"
+description = "Safe model inference, streaming, chat, and concurrent requests for vllm.cpp"
+readme = "README.md"
+documentation = "https://docs.rs/vllm-cpp"
+keywords = ["llm", "inference", "ffi", "vllm", "machine-learning"]
+categories = ["api-bindings", "science"]
 
 [features]
 default = ["bundled"]
@@ -17,6 +21,10 @@ cuda-cutlass = ["cuda", "vllm-cpp-sys/cuda-cutlass"]
 triton-aot = ["cuda", "vllm-cpp-sys/triton-aot"]
 vulkan = ["vllm-cpp-sys/vulkan"]
 serde = ["dep:serde_json"]
+
+[package.metadata.docs.rs]
+features = ["serde"]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
 serde_json = { version = "1.0.149", optional = true }
