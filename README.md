@@ -7,7 +7,7 @@ Rust bindings for [vllm.cpp](https://github.com/mudler/vllm.cpp), organized as:
 
 ## Status
 
-The safe crate provides a cloneable engine API for model loading, blocking completion and streaming, non-blocking concurrent requests, structured output, and raw-JSON chat. An optional `serde` feature adds `serde_json::Value` chat helpers. The sys crate provides checked-in generated FFI declarations with C/Rust layout checks and coverage for all 19 exported C symbols.
+The safe crate provides a cloneable engine API for local model loading, blocking completion and streaming, non-blocking concurrent requests, structured output, and raw-JSON chat. It also provides an always-available synchronous Hugging Face resolver for standalone GGUF files and runtime-complete sparse Safetensors snapshots, plus a Clap-based interactive chat example using those APIs. An optional `serde` feature adds `serde_json::Value` chat helpers. The sys crate provides checked-in generated FFI declarations with C/Rust layout checks and coverage for all 19 exported C symbols.
 
 Linux x86_64 CPU builds support bundled static, bundled dynamic, system static, and system dynamic linking. Bundled CPU builds also target Linux aarch64 and Apple ARM64. Experimental bundled builds expose Linux x86_64/aarch64 build configuration for CUDA, external CUTLASS, Triton AOT, and Vulkan, plus Apple ARM64 Metal and external MLX configuration. Accelerator features are build integration surfaces, not runtime-support claims. vllm.cpp is pinned at `34aedfbe8ed9779697905541a62e2160ccfd9c05`, which exposes C ABI version 10.
 
@@ -41,7 +41,9 @@ git submodule update --init --recursive
 
 ## Safe API
 
-The packaged [`vllm-cpp` guide](vllm-cpp/README.md) covers model requirements, safe ownership, callbacks, concurrency, features, link modes, and deployment. The [`vllm-cpp-sys` guide](vllm-cpp-sys/README.md) documents the raw ABI and native build boundary.
+The packaged [`vllm-cpp` guide](vllm-cpp/README.md) covers local and Hugging Face model resolution, safe ownership, callbacks, concurrency, features, link modes, and deployment. The [`vllm-cpp-sys` guide](vllm-cpp-sys/README.md) documents the raw ABI and native build boundary.
+
+`Engine::load` accepts a native-compatible model directory or standalone GGUF. `HuggingFaceModel` synchronously resolves into the normal Hugging Face cache before engine construction, defaulting to the Hub's mutable `main` revision; `.revision(...)` can pin a branch, tag, or commit. GGUF mode selects one safe root file. Safetensors mode pins downloads to repository metadata's commit SHA and retrieves only native runtime requirements: root configuration/tokenizer files and either unsharded weights or an index plus all root shards. Every runnable example accepts a bare or explicit local path and both Hub artifact forms with optional `--revision`. Cached downloads are reused. Retrieval does not prove model/backend compatibility.
 
 `EngineBuilder` owns model settings and converts them to temporary C strings only for the load call. `SamplingParams` owns stop strings and structured constraints. Completion and chat strings are copied into Rust values before the matching native free function runs.
 
@@ -49,7 +51,7 @@ The packaged [`vllm-cpp` guide](vllm-cpp/README.md) covers model requirements, s
 
 All streaming callbacks receive copied UTF-8 deltas. Blocking callbacks may borrow stack data; their panics are caught before the C boundary and resumed only after the native call returns. Asynchronous callbacks must be `Send + 'static`, run on a native delivery thread, and report panic as `Error::CallbackPanicked` from `wait`. Waiting for or freeing a request from its own callback thread is prohibited by ABI v10: `wait` returns `Error::RequestCallbackThread`, while drop transfers cleanup to a prestarted reaper that owns the request, callback, and engine until native free/cancel/join completes. Chat methods accept raw OpenAI-compatible request JSON; enable `serde` for `serde_json::Value` request and response helpers.
 
-See [the examples guide](vllm-cpp/examples/README.md) for ordinary Linux and optional Nix setup and commands for every example. Release-facing changes are recorded in the [changelog](CHANGELOG.md), and maintainers use the manual [release process](RELEASING.md).
+See [the examples guide](vllm-cpp/examples/README.md) for ordinary Linux and optional Nix setup, commands for every example, and the interactive chat CLI's local/Hub model forms and generation options. Release-facing changes are recorded in the [changelog](CHANGELOG.md), and maintainers use the manual [release process](RELEASING.md).
 
 ## Build and Test
 
@@ -64,7 +66,7 @@ just ci
 
 Set `CMAKE_BUILD_PARALLEL_LEVEL` to control native parallelism. The default bundled build remains deterministic and CPU-only: native tests, examples, the HTTP server, CUDA, Metal, MLX, Vulkan, Triton, and CUTLASS fetching are disabled explicitly. Use `nix develop .#msrv -c just msrv` for the exact local Rust 1.85.0 policy check; the manual `platforms` workflow runs the same exact toolchain policy.
 
-`build.rs` is consumer-only native build/link integration; it does not download dependencies or compile/execute the maintainer layout probe. Ordinary consumers do not need Just, bindgen, or libclang. Normal first-time Cargo dependency resolution may access crates.io; use Cargo's standard `--offline` mode after dependencies are cached.
+`build.rs` is consumer-only native build/link integration; it does not download dependencies or compile/execute the maintainer layout probe. Ordinary consumers do not need Just, bindgen, or libclang. Normal first-time Cargo dependency resolution may access crates.io; use Cargo's standard `--offline` mode after dependencies are cached. The high-level crate's required `hf-hub` 0.5 dependency uses only its synchronous `ureq` feature, without Tokio or another async runtime. Library download progress is disabled by default.
 
 ## Experimental Backend Builds
 
@@ -103,7 +105,7 @@ Compilation does not establish runtime correctness. Known native evidence blocke
 
 ## Test Model and Sanitizers
 
-Model-backed tests use Apache-2.0 `Qwen/Qwen3-0.6B` at pinned revision `c1899de289a04d12100db370d81485cdf75e47ca`. Download or reuse the cache and verify every file, then run exactly 14 blocking and request-lifecycle model tests serially:
+Model-backed tests use Apache-2.0 `Qwen/Qwen3-0.6B` at pinned revision `c1899de289a04d12100db370d81485cdf75e47ca`. Download or reuse the cache and verify every file, then run exactly 15 blocking and request-lifecycle model tests serially, including choice and JSON-Schema structured-output enforcement:
 
 ```console
 model=$(just setup-test-model)

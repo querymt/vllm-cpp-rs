@@ -3,6 +3,41 @@ use std::fmt;
 
 use vllm_cpp_sys as ffi;
 
+/// An error returned while resolving a model from the Hugging Face Hub.
+///
+/// External transport errors are converted to contextual strings so this type
+/// remains stable, cloneable, and comparable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum HuggingFaceError {
+    /// A repository, revision, or filename is invalid.
+    InvalidInput { message: String },
+    /// The requested revision is not present in the selected local cache.
+    CacheMiss { message: String },
+    /// A repository snapshot lacks required runtime files or metadata.
+    Incomplete { message: String },
+    /// A Hugging Face API or download operation failed.
+    Hub { message: String },
+    /// A local cache operation failed.
+    Io { message: String },
+}
+
+impl fmt::Display for HuggingFaceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput { message } => write!(f, "invalid Hugging Face model: {message}"),
+            Self::CacheMiss { message } => write!(f, "Hugging Face cache miss: {message}"),
+            Self::Incomplete { message } => {
+                write!(f, "incomplete Hugging Face snapshot: {message}")
+            }
+            Self::Hub { message } => write!(f, "Hugging Face Hub failure: {message}"),
+            Self::Io { message } => write!(f, "Hugging Face cache I/O failure: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for HuggingFaceError {}
+
 /// An error returned by the safe vllm.cpp wrapper.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]

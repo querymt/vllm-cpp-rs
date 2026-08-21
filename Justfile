@@ -384,6 +384,9 @@ package-test:
         and (map(select(.name == "vllm-cpp" and .documentation == "https://docs.rs/vllm-cpp")) | length == 1)
         and (map(select(.name == "vllm-cpp-sys" and .documentation == "https://docs.rs/vllm-cpp-sys")) | length == 1)
         and (map(select(.name == "vllm-cpp") | .dependencies[] | select(.name == "vllm-cpp-sys" and .req == ("=" + $version) and .uses_default_features == false)) | length == 1)
+        and (map(select(.name == "vllm-cpp") | .dependencies[] | select(.name == "hf-hub" and .req == "^0.5.0" and .optional == false and .uses_default_features == false and .features == ["ureq"])) | length == 1)
+        and (map(select(.name == "vllm-cpp") | .dependencies[] | select(.name == "serde_json" and .optional == false and .kind == null)) | length == 1)
+        and (map(select(.name == "vllm-cpp") | .dependencies[] | select(.name == "clap" and .req == "=4.6.1" and .kind == "dev" and .optional == false and .features == ["derive"])) | length == 1)
     ' "$metadata" >/dev/null
 
     sys_list="$temp/vllm-cpp-sys.list"
@@ -485,6 +488,7 @@ package-test:
       README.md \
       examples/README.md \
       examples/chat.rs \
+      examples/common/mod.rs \
       examples/complete.rs \
       examples/concurrent.rs \
       examples/stream.rs \
@@ -492,6 +496,7 @@ package-test:
       src/callback.rs \
       src/engine.rs \
       src/error.rs \
+      src/hf.rs \
       src/lib.rs \
       src/params.rs \
       src/request.rs \
@@ -727,8 +732,11 @@ package-test:
         and .[0].license == "MIT OR Apache-2.0"
         and .[0].rust_version == "1.85"
         and .[0].features.default == ["bundled"]
-        and .[0].features.serde == ["dep:serde_json"]
+        and .[0].features.serde == []
         and (.[0].dependencies | map(select(.name == "vllm-cpp-sys" and .req == ("=" + $version) and .uses_default_features == false)) | length == 1)
+        and (.[0].dependencies | map(select(.name == "hf-hub" and .req == "^0.5.0" and .optional == false and .uses_default_features == false and .features == ["ureq"])) | length == 1)
+        and (.[0].dependencies | map(select(.name == "serde_json" and .optional == false and .kind == null)) | length == 1)
+        and (.[0].dependencies | map(select(.name == "clap" and .req == "=4.6.1" and .kind == "dev" and .optional == false and .features == ["derive"])) | length == 1)
     ' <(cargo metadata --manifest-path "$safe_root/Cargo.toml" \
       --locked --offline --no-deps --format-version 1) >/dev/null
 
@@ -748,12 +756,19 @@ package-test:
     vllm-cpp-sys = { path = "$sys_root" }
     EOF
     cat > "$safe_consumer/src/main.rs" <<'EOF'
-    use vllm_cpp::{abi_version, expected_abi_version, Engine, Error, SamplingParams};
+    use vllm_cpp::{
+        abi_version, expected_abi_version, Engine, Error, HuggingFaceModel, SamplingParams,
+    };
 
     fn main() {
         assert_eq!(expected_abi_version(), 10);
         assert_eq!(abi_version(), 10);
         let _params = SamplingParams::greedy().max_tokens(1);
+        let resolver = HuggingFaceModel::gguf("owner/model", "model.gguf")
+            .revision("revision")
+            .cache_dir("/nonexistent/vllm-cpp-rs-safe-package-hf-cache")
+            .offline(true);
+        assert!(resolver.resolve().is_err());
         assert!(matches!(
             Engine::load("/nonexistent/vllm-cpp-rs-safe-package-smoke"),
             Err(Error::ModelLoad { .. })

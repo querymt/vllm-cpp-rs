@@ -14,7 +14,28 @@ println!("{}", completion.text);
 # Ok::<(), vllm_cpp::Error>(())
 ```
 
-The model argument is a directory understood by the pinned native engine, not a single weights file. The known-good test layout contains `model.safetensors`, `config.json`, `tokenizer.json`, and `tokenizer_config.json`; model-family compatibility remains a native vllm.cpp concern. See the packaged [examples guide](examples/README.md) for blocking completion, streaming, chat, structured output, and concurrent-request commands.
+`Engine::load` accepts either a model directory or a standalone GGUF file understood by the pinned native engine. The known-good Safetensors test layout contains `model.safetensors`, `config.json`, `tokenizer.json`, and `tokenizer_config.json`; model-family compatibility remains a native vllm.cpp concern. See the packaged [examples guide](examples/README.md) for local and Hugging Face loading, blocking completion, streaming, JSON-Schema output, concurrent-request commands, and the Clap-based interactive chat CLI with retained history and supported sampling controls.
+
+## Hugging Face models
+
+`HuggingFaceModel` is an always-available synchronous resolver backed by the required `hf-hub` 0.5 dependency. It returns a local `PathBuf` that can be passed unchanged to `Engine::load`:
+
+```rust,no_run
+use vllm_cpp::{Engine, HuggingFaceModel};
+
+let path = HuggingFaceModel::gguf("owner/repository", "model.gguf")
+    // Omit this builder to follow the Hub's mutable `main` revision.
+    .revision("0123456789abcdef0123456789abcdef01234567")
+    .resolve()?;
+let engine = Engine::load(path)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`HuggingFaceModel::gguf(repo, filename)` and `HuggingFaceModel::safetensors(repo)` default to the Hub's mutable `main` revision. The `.revision(...)` builder accepts a branch, tag, or commit; immutable commit SHAs are recommended for reproducibility. The default cache honors `HF_HOME` through the normal Hugging Face layout and uses the cached login token when available. Builders can select a Hub cache directory, override the token, enable progress, or require cache-only offline resolution. Explicit tokens are redacted from resolver `Debug` output. The official endpoint is fixed; `HF_ENDPOINT` is not used.
+
+GGUF mode retrieves one root-level lowercase `.gguf` file and rejects split sets. Safetensors mode first reads repository metadata for `main` or the explicit revision, pins downloads to its commit SHA, and retrieves only the root files required by this native loader: `config.json`, `tokenizer.json`, optional `tokenizer_config.json`, and either `model.safetensors` or the root index plus every indexed root shard. It returns the shared `snapshots/<sha>` directory and creates that revision's cache ref only after a complete successful retrieval. It does not download unrelated repository assets. Offline mode constructs no network API, reads the cached `main` ref by default, and distinguishes a missing cache revision from an incomplete cached snapshot.
+
+Retrieval validates cache and snapshot completeness; it does not prove that the pinned native engine supports the repository's model architecture, tokenizer, quantization, or backend.
 
 ## API and ownership
 
@@ -32,13 +53,15 @@ The model argument is a directory understood by the pinned native engine, not a 
 | `bundled` (default) | Build and statically link the pinned CPU native source |
 | `system` | Link a caller-provided installation; use with `--no-default-features` |
 | `dynamic-link` | Link `libvllm` dynamically in bundled or system mode |
-| `serde` | Add `serde_json::Value` chat helpers |
+| `serde` | Add `serde_json::Value` chat helpers; JSON parsing for Hub resolution is always present |
 | `cuda` | Experimental bundled CUDA build configuration |
 | `cuda-cutlass` | Experimental CUDA build with a caller-provided CUTLASS >=4.5.0 tree |
 | `triton-aot` | Experimental CUDA build using checked-in Triton AOT artifacts |
 | `vulkan` | Experimental bundled Vulkan build configuration |
 | `metal` | Experimental native Metal build on Apple ARM64 |
 | `mlx` | Experimental external MLX provider on Apple ARM64; implies `metal` |
+
+Hugging Face resolution is not a Cargo feature: synchronous `hf-hub` support is a normal dependency in every build and does not add Tokio or another async runtime.
 
 `bundled` and `system` conflict. CUDA and Vulkan conflict, and accelerator features are bundled-only but do not implicitly enable `bundled` for `--no-default-features` builds. Metal/MLX require exact `aarch64-apple-darwin`; MLX additionally requires an external `MLX_ROOT` with its headers, dylib, and metallib. The workspace [backend documentation](https://github.com/querymt/vllm-cpp-rs#experimental-backend-builds) records exact environment variables, supported build architectures, and current blockers.
 
