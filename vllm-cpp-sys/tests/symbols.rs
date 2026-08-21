@@ -2,6 +2,8 @@ use std::ffi::{c_char, c_void};
 
 use vllm_cpp_sys as ffi;
 
+const _: [(); 10] = [(); ffi::VLLM_ABI_VERSION as usize];
+
 unsafe extern "C" fn token_callback(
     _delta_text: *const c_char,
     _finished: bool,
@@ -35,14 +37,15 @@ fn every_c_api_symbol_links() {
 
 #[test]
 fn reports_expected_abi_and_handles_invalid_model_path() {
+    assert_eq!(ffi::VLLM_ABI_VERSION, 10);
     assert_eq!(unsafe { ffi::vllm_abi_version() }, 10);
 
     let mut params = unsafe { ffi::vllm_model_params_default() };
-    params.model_path = c"/nonexistent/vllm-cpp-rs-bootstrap-model".as_ptr();
+    params.model_path = c"/nonexistent/vllm-cpp-rs-sys-model".as_ptr();
     let mut engine = std::ptr::null_mut();
     let status = unsafe { ffi::vllm_engine_load(&params, &mut engine) };
 
-    assert_eq!(status, 2);
+    assert_eq!(status, ffi::vllm_status_VLLM_ERR_MODEL_LOAD);
     assert!(engine.is_null());
     let error = unsafe { std::ffi::CStr::from_ptr(ffi::vllm_last_error()) };
     assert!(!error.to_bytes().is_empty());

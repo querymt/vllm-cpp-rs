@@ -10,6 +10,8 @@ description = "Rust bindings for vllm.cpp"
 [features]
 default = ["bundled"]
 bundled = ["vllm-cpp-sys/bundled"]
+system = ["vllm-cpp-sys/system"]
+dynamic-link = ["vllm-cpp-sys/dynamic-link"]
 
 [dependencies]
 vllm-cpp-sys = { workspace = true, default-features = false }
