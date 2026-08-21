@@ -1,11 +1,11 @@
+mod common;
+
 use std::io::{self, Write};
 
 use vllm_cpp::{Engine, SamplingParams, StreamControl};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model = std::env::args_os()
-        .nth(1)
-        .ok_or("usage: concurrent <model-directory>")?;
+    let model = common::resolve_model("concurrent")?;
     let engine = Engine::load(model)?;
     let params = SamplingParams::greedy().max_tokens(16);
 

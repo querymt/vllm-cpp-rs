@@ -1,18 +1,25 @@
+mod common;
+
 use vllm_cpp::{Engine, SamplingParams, StructuredOutput};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model = std::env::args_os()
-        .nth(1)
-        .ok_or("usage: structured <model-directory>")?;
+    let model = common::resolve_model("structured")?;
     let engine = Engine::load(model)?;
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "location": { "type": "string" },
+            "temperature_celsius": { "type": "number" },
+            "condition": { "type": "string" }
+        },
+        "required": ["location", "temperature_celsius", "condition"],
+        "additionalProperties": false
+    }"#;
     let completion = engine.complete(
-        "Choose exactly one color: red or blue. Answer:",
+        "Extract the weather report as JSON: Paris is sunny and 22 degrees Celsius.",
         &SamplingParams::greedy()
-            .max_tokens(8)
-            .structured_output(StructuredOutput::Choice(vec![
-                "red".to_owned(),
-                "blue".to_owned(),
-            ])),
+            .max_tokens(64)
+            .structured_output(StructuredOutput::JsonSchema(schema.to_owned())),
     )?;
     println!("{}", completion.text);
     Ok(())

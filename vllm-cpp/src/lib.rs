@@ -2,8 +2,9 @@
 //!
 //! # Entry points
 //!
-//! Create an [`Engine`] with [`Engine::load`] or configure native model settings
-//! through [`EngineBuilder`]. [`SamplingParams`] owns sampling, stop-string, and
+//! Resolve a Hub model with [`HuggingFaceModel`] (default `main`, or an explicit
+//! revision), then create an [`Engine`] with [`Engine::load`] or configure native
+//! model settings through [`EngineBuilder`]. [`SamplingParams`] owns sampling, stop-string, and
 //! [`StructuredOutput`] settings for completion calls. The engine provides
 //! blocking completion, streaming, raw-JSON chat, and [`Engine::submit`] for a
 //! concurrent [`Request`]. Enable `serde` for `serde_json::Value` chat helpers.
@@ -30,8 +31,10 @@
 //! [`expected_abi_version`] before versioned structs cross FFI. The default
 //! `bundled` feature builds the pinned native source. `system` selects a
 //! caller-provided installation, `dynamic-link` selects shared linking, and
-//! `serde` adds typed JSON helpers. CUDA, CUTLASS, Triton AOT, Vulkan, Metal, and
-//! external MLX features are experimental bundled build configuration.
+//! `serde` adds typed JSON helpers. The non-optional `hf-hub` dependency provides
+//! synchronous, cache-aware model retrieval without an async runtime. CUDA,
+//! CUTLASS, Triton AOT, Vulkan, Metal, and external MLX features are experimental
+//! bundled build configuration.
 //!
 //! Dynamic linking does not deploy `libvllm.so` or `libvllm.dylib`; applications
 //! must make it and its runtime dependencies visible through the platform loader,
@@ -43,12 +46,14 @@
 mod callback;
 mod engine;
 mod error;
+mod hf;
 mod params;
 mod request;
 
 pub use callback::{StreamControl, StreamEvent, StreamOutcome};
 pub use engine::{Completion, Engine, EngineBuilder, FinishReason};
-pub use error::Error;
+pub use error::{Error, HuggingFaceError};
+pub use hf::HuggingFaceModel;
 pub use params::{SamplingParams, SchedulerPolicy, StructuredOutput, Toggle};
 pub use request::{Request, RequestOutcome};
 
