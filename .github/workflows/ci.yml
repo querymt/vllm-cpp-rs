@@ -1,0 +1,153 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
+  CMAKE_GENERATOR: Ninja
+
+jobs:
+  fmt:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4.4.0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install Just
+        uses: extractions/setup-just@v3.1.0
+        with:
+          just-version: "1.40.0"
+      - name: Check formatting
+        run: just fmt-check
+
+  clippy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4.4.0
+        with:
+          submodules: recursive
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache Cargo state
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
+      - name: Install Just
+        uses: extractions/setup-just@v3.1.0
+        with:
+          just-version: "1.40.0"
+      - name: Lint
+        run: just lint
+
+  docs:
+    needs: [fmt, clippy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4.4.0
+        with:
+          submodules: recursive
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo state
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
+      - name: Install Just
+        uses: extractions/setup-just@v3.1.0
+        with:
+          just-version: "1.40.0"
+      - name: Build documentation
+        run: just docs
+
+  test:
+    needs: [fmt, clippy]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4.4.0
+        with:
+          submodules: recursive
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo state
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
+      - name: Test model-free workspace targets
+        run: env -u VLLM_CPP_TEST_MODEL cargo test --locked --workspace --all-targets --features vllm-cpp/serde
+
+  native:
+    needs: [docs, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4.4.0
+        with:
+          submodules: recursive
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo state
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends binutils build-essential clang cmake ninja-build
+      - name: Install Just
+        uses: extractions/setup-just@v3.1.0
+        with:
+          just-version: "1.40.0"
+      - name: Install bindgen
+        run: cargo install bindgen-cli --version 0.72.1 --locked
+      - name: Check generated bindings and FFI conformance
+        run: just sys
+      - name: Test Linux CPU link modes
+        run: just link-modes
+
+  package:
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4.4.0
+        with:
+          submodules: recursive
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo state
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
+      - name: Dry-run workspace publish
+        run: cargo publish --workspace --locked --dry-run
