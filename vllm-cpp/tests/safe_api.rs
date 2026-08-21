@@ -7,6 +7,7 @@ assert_impl_all!(Engine: Send, Sync, Clone);
 assert_impl_all!(HuggingFaceError: Clone, std::fmt::Debug, Eq, PartialEq);
 assert_impl_all!(HuggingFaceModel: Clone, std::fmt::Debug);
 assert_impl_all!(Request: Send);
+assert_impl_all!(vllm_cpp::SamplingParams: Clone, Send, Sync);
 assert_not_impl_any!(Request: Sync);
 
 fn missing_model() -> &'static str {
@@ -25,6 +26,7 @@ fn hugging_face_constructors_accept_default_and_explicit_revisions() {
 fn reports_expected_abi() {
     assert_eq!(vllm_cpp::expected_abi_version(), 10);
     assert_eq!(vllm_cpp::abi_version(), 10);
+    assert!(!vllm_cpp::version().expect("native version").is_empty());
 }
 
 #[test]
