@@ -1,18 +1,21 @@
 //! Safe Rust bindings for the stable vllm.cpp C API.
 //!
-//! The central [`Engine`] owns a complete native serving stack. Construct
-//! request parameters in Rust, then use blocking completion or chat methods
-//! without handling native pointers or free functions.
+//! [`Engine`] is a cloneable, shared owner of a complete native serving stack.
+//! It provides blocking completion, streaming, and chat methods plus
+//! [`Engine::submit`] for non-blocking requests. Each [`Request`] retains the
+//! engine until native request free/join completes.
 
 mod callback;
 mod engine;
 mod error;
 mod params;
+mod request;
 
 pub use callback::{StreamControl, StreamEvent, StreamOutcome};
 pub use engine::{Completion, Engine, EngineBuilder, FinishReason};
 pub use error::Error;
 pub use params::{SamplingParams, SchedulerPolicy, StructuredOutput, Toggle};
+pub use request::{Request, RequestOutcome};
 
 /// Returns the compile-time C ABI expected by this crate.
 #[must_use]
