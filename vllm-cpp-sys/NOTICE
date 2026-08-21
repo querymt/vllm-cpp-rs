@@ -1,0 +1,43 @@
+vllm.cpp
+Copyright 2026 Ettore Di Giacinto
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+This product is a C++ port of vLLM (https://github.com/vllm-project/vllm),
+which is licensed under the Apache License, Version 2.0. It incorporates,
+ports, and/or vendors code from third-party projects, including:
+
+  - vLLM (Apache-2.0) — the upstream project this is a 1:1 port of.
+  - Marlin / GPTQ-Marlin mixed-precision kernels (Apache-2.0), as vendored
+    by vLLM under src/vt/cuda/marlin/.
+  - NVIDIA CUTLASS (BSD-3-Clause) — used for FP4/FP8 GEMM kernels.
+  - xgrammar (Apache-2.0) — C++ grammar core, vendored for structured output.
+  - cpp-httplib (MIT) and nlohmann/json (MIT) — header-only dependencies.
+  - google/minja (MIT) - header-only Jinja engine vendored under
+    third_party/minja/ (with its LICENSE), used as the chat-template renderer
+    in src/vllm/entrypoints/chat_template.cpp.
+
+Each such component remains under its own license; the notices and license
+texts of vendored third-party code are retained in their respective source
+files and directories.
+
+TRADEMARKS
+
+vllm.cpp is an independent community project. It is NOT affiliated with,
+endorsed by, or sponsored by the vLLM project, the PyTorch Foundation, or the
+Linux Foundation.
+
+"vLLM" is a mark of its respective owners and is used in this repository in its
+descriptive sense only, to identify the upstream project that vllm.cpp ports,
+mirrors, and is gated against. No claim of ownership of that mark is made, and
+nothing here implies that the vLLM project has reviewed, approved, or endorsed
+this software. Section 6 of the Apache License, Version 2.0 grants no trademark
+rights, and none are claimed.
+
+Other names and marks referenced here (llama.cpp, SGLang, MLX, CUTLASS,
+FlashInfer, Marlin, TRT-LLM, and others) belong to their respective owners and
+are likewise used descriptively.

@@ -1,0 +1,15 @@
+[package]
+name = "vllm-cpp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Rust bindings for vllm.cpp"
+
+[features]
+default = ["bundled"]
+bundled = ["vllm-cpp-sys/bundled"]
+
+[dependencies]
+vllm-cpp-sys = { workspace = true, default-features = false }
