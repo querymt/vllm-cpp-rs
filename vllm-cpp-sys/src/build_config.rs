@@ -28,11 +28,13 @@ pub struct Features {
     pub cuda_cutlass: bool,
     pub triton_aot: bool,
     pub vulkan: bool,
+    pub metal: bool,
+    pub mlx: bool,
 }
 
 impl Features {
     fn has_backend(&self) -> bool {
-        self.cuda || self.cuda_cutlass || self.triton_aot || self.vulkan
+        self.cuda || self.cuda_cutlass || self.triton_aot || self.vulkan || self.metal || self.mlx
     }
 }
 
@@ -47,6 +49,7 @@ pub struct Target {
 pub struct Environment {
     pub cuda_architectures: Option<String>,
     pub cutlass_dir: Option<PathBuf>,
+    pub mlx_root: Option<PathBuf>,
     pub sanitizer: Option<String>,
 }
 
@@ -60,6 +63,8 @@ pub struct Inputs {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkRequirement {
     Library(&'static str),
+    Framework(&'static str),
+    NativeSearch(PathBuf),
     CudaToolkit(CudaComponent),
 }
 
@@ -153,6 +158,7 @@ pub fn plan(inputs: &Inputs, probe: &impl PathProbe) -> Result<BuildPlan, Config
     } else {
         None
     };
+    let mlx_root = validate_mlx(inputs, probe)?;
 
     let sanitizer = inputs.environment.sanitizer.as_deref().unwrap_or("OFF");
     if inputs.features.cuda && sanitizer != "OFF" {
@@ -167,9 +173,9 @@ pub fn plan(inputs: &Inputs, probe: &impl PathProbe) -> Result<BuildPlan, Config
         ("VLLM_CPP_BUILD_EXAMPLES", "OFF".to_owned()),
         ("VLLM_CPP_SERVER", "OFF".to_owned()),
         ("VLLM_CPP_CUDA", on_off(inputs.features.cuda)),
-        ("VLLM_CPP_METAL", "OFF".to_owned()),
+        ("VLLM_CPP_METAL", on_off(inputs.features.metal)),
         ("VLLM_CPP_VULKAN", on_off(inputs.features.vulkan)),
-        ("VLLM_CPP_MLX", "OFF".to_owned()),
+        ("VLLM_CPP_MLX", on_off(inputs.features.mlx)),
         ("VLLM_CPP_TRITON", on_off(inputs.features.triton_aot)),
         ("VLLM_CPP_TRITON_REGEN", "OFF".to_owned()),
         ("VLLM_CPP_CUTLASS_FETCH", "OFF".to_owned()),
@@ -181,6 +187,9 @@ pub fn plan(inputs: &Inputs, probe: &impl PathProbe) -> Result<BuildPlan, Config
     if let Some(root) = cutlass_dir {
         cmake_defines.push(("VLLM_CPP_CUTLASS_DIR", root.to_string_lossy().into_owned()));
     }
+    if let Some(root) = &mlx_root {
+        cmake_defines.push(("MLX_ROOT", root.to_string_lossy().into_owned()));
+    }
 
     let mut link_requirements = platform_link_requirements(inputs)?;
     if inputs.features.cuda && !inputs.features.dynamic_link {
@@ -191,6 +200,12 @@ pub fn plan(inputs: &Inputs, probe: &impl PathProbe) -> Result<BuildPlan, Config
         if inputs.features.triton_aot {
             link_requirements.push(LinkRequirement::CudaToolkit(CudaComponent::Driver));
         }
+    }
+    if let Some(root) = mlx_root.filter(|_| !inputs.features.dynamic_link) {
+        link_requirements.extend([
+            LinkRequirement::NativeSearch(root.join("lib")),
+            LinkRequirement::Library("mlx"),
+        ]);
     }
 
     Ok(BuildPlan {
@@ -223,6 +238,9 @@ fn validate_feature_implications(features: &Features) -> Result<(), ConfigError>
     if features.triton_aot && !features.cuda {
         return Err(ConfigError::new("`triton-aot` requires the `cuda` feature"));
     }
+    if features.mlx && !features.metal {
+        return Err(ConfigError::new("`mlx` requires the `metal` feature"));
+    }
     if features.cuda && features.vulkan {
         return Err(ConfigError::new(
             "`cuda` and `vulkan` cannot be combined in release 0.1; build separate backend artifacts",
@@ -232,15 +250,19 @@ fn validate_feature_implications(features: &Features) -> Result<(), ConfigError>
 }
 
 fn validate_targets(inputs: &Inputs) -> Result<(), ConfigError> {
-    if inputs.target.os != "linux" {
+    let linux =
+        inputs.target.os == "linux" && matches!(inputs.target.arch.as_str(), "x86_64" | "aarch64");
+    let apple_arm64 = inputs.target.triple == "aarch64-apple-darwin"
+        && inputs.target.os == "macos"
+        && inputs.target.arch == "aarch64";
+
+    if !linux && !apple_arm64 {
         return Err(ConfigError::new(format!(
-            "linking is implemented only for Linux, not target {}",
+            "supported targets are Linux x86_64/aarch64 and aarch64-apple-darwin; target {} is unsupported",
             inputs.target.triple
         )));
     }
-    if (inputs.features.cuda || inputs.features.vulkan)
-        && !matches!(inputs.target.arch.as_str(), "x86_64" | "aarch64")
-    {
+    if (inputs.features.cuda || inputs.features.vulkan) && !linux {
         let feature = if inputs.features.cuda {
             "cuda"
         } else {
@@ -248,6 +270,13 @@ fn validate_targets(inputs: &Inputs) -> Result<(), ConfigError> {
         };
         return Err(ConfigError::new(format!(
             "`{feature}` supports only Linux x86_64/aarch64 targets; target {} is unsupported",
+            inputs.target.triple
+        )));
+    }
+    if (inputs.features.metal || inputs.features.mlx) && !apple_arm64 {
+        let feature = if inputs.features.mlx { "mlx" } else { "metal" };
+        return Err(ConfigError::new(format!(
+            "`{feature}` supports only aarch64-apple-darwin; target {} is unsupported",
             inputs.target.triple
         )));
     }
@@ -366,6 +395,57 @@ fn validate_cutlass(
     Ok(canonical)
 }
 
+fn validate_mlx(inputs: &Inputs, probe: &impl PathProbe) -> Result<Option<PathBuf>, ConfigError> {
+    if !inputs.features.mlx {
+        if inputs.environment.mlx_root.is_some() {
+            return Err(ConfigError::new(
+                "MLX_ROOT is set but the `mlx` feature is disabled; remove it or enable `mlx`",
+            ));
+        }
+        return Ok(None);
+    }
+
+    let root = inputs.environment.mlx_root.as_deref().ok_or_else(|| {
+        ConfigError::new(
+            "the `mlx` feature requires MLX_ROOT pointing to an existing MLX install; MLX is external and is never fetched or packaged",
+        )
+    })?;
+    if !probe.is_dir(root) {
+        return Err(ConfigError::new(format!(
+            "MLX_ROOT={} is not an existing directory",
+            root.display()
+        )));
+    }
+    let canonical = probe.canonicalize(root).map_err(|error| {
+        ConfigError::new(format!(
+            "failed to canonicalize MLX_ROOT={}: {error}",
+            root.display()
+        ))
+    })?;
+    if !canonical.is_absolute() {
+        return Err(ConfigError::new(format!(
+            "MLX_ROOT must resolve to an absolute path; got {}",
+            canonical.display()
+        )));
+    }
+
+    for relative in [
+        "include/mlx/array.h",
+        "lib/libmlx.dylib",
+        "lib/mlx.metallib",
+    ] {
+        let path = canonical.join(relative);
+        if !probe.is_file(&path) {
+            return Err(ConfigError::new(format!(
+                "MLX_ROOT must contain {relative}; missing {}",
+                path.display()
+            )));
+        }
+    }
+
+    Ok(Some(canonical))
+}
+
 fn parse_cutlass_version(contents: &str) -> Option<(u32, u32, u32)> {
     fn value(contents: &str, name: &str) -> Option<u32> {
         contents.lines().find_map(|line| {
@@ -386,15 +466,25 @@ fn platform_link_requirements(inputs: &Inputs) -> Result<Vec<LinkRequirement>, C
     if inputs.features.dynamic_link {
         return Ok(Vec::new());
     }
-    if inputs.target.os != "linux" {
-        return Err(ConfigError::new(format!(
-            "static linking is implemented only for Linux, not {}",
-            inputs.target.os
-        )));
+
+    match inputs.target.os.as_str() {
+        "linux" => Ok(vec![
+            LinkRequirement::Library("stdc++"),
+            LinkRequirement::Library("pthread"),
+            LinkRequirement::Library("dl"),
+        ]),
+        "macos" => {
+            let mut requirements = vec![LinkRequirement::Library("c++")];
+            if inputs.features.metal {
+                requirements.extend([
+                    LinkRequirement::Framework("Metal"),
+                    LinkRequirement::Framework("Foundation"),
+                ]);
+            }
+            Ok(requirements)
+        }
+        os => Err(ConfigError::new(format!(
+            "static linking is not implemented for target OS {os}"
+        ))),
     }
-    Ok(vec![
-        LinkRequirement::Library("stdc++"),
-        LinkRequirement::Library("pthread"),
-        LinkRequirement::Library("dl"),
-    ])
 }

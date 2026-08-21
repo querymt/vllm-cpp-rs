@@ -11,6 +11,8 @@ All notable changes to this project will be documented in this file.
 - RAII ownership for native engines, requests, completions, and strings, including callback panic containment and callback-thread-safe deferred request cleanup.
 - Linux x86_64 CPU builds for bundled and system libraries with static or dynamic linking.
 - Experimental bundled Linux x86_64/aarch64 build integration for CUDA, external CUTLASS, Triton AOT, and Vulkan.
+- Bundled Apple ARM64 CPU and Metal build/link integration, plus optional external MLX integration with deterministic target/root/file validation and no packaged MLX payload or rpath.
+- Manual hosted exact Rust 1.85.0, Linux ARM64 CPU, Apple ARM64 CPU/Metal compile-link, and Mesa llvmpipe Vulkan lanes.
 
 ### Compatibility
 
@@ -20,5 +22,6 @@ All notable changes to this project will be documented in this file.
 ### Known limitations
 
 - The supported runtime tier is native Linux x86_64 CPU. Accelerator features are experimental build/configuration surfaces, not runtime-support claims.
-- Known native blockers include a CUDA teardown SIGSEGV after otherwise successful tests, a CUDA bf16 numerical tolerance failure, CUTLASS concurrent-output differences, and incomplete Vulkan runtime coverage.
-- Dynamic builds require callers to deploy `libvllm.so` and its runtime dependencies through a loader-visible path. System static builds must also provide the matching private BLAKE3 archive.
+- Known native blockers include a CUDA teardown SIGSEGV after otherwise successful tests, a CUDA bf16 numerical tolerance failure, CUTLASS concurrent-output differences, incomplete Vulkan attention/model runtime, and external MLX deployment plus unvalidated release-lane model/runtime behavior.
+- The hosted Metal lane checks compile/link only, the software Vulkan lane checks backend/ops only, and accelerator builds do not establish runtime correctness.
+- Dynamic builds require callers to deploy `libvllm.so` or `libvllm.dylib` and its runtime dependencies through a loader-visible path. System static builds must also provide the matching private BLAKE3 archive.

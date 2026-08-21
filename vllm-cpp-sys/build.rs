@@ -25,6 +25,7 @@ const RERUN_ENV: &[&str] = &[
     "VLLM_CPP_BLAKE3_LIB_DIR",
     "VLLM_CPP_CUDA_ARCHITECTURES",
     "VLLM_CPP_CUTLASS_DIR",
+    "MLX_ROOT",
     "VLLM_CPP_SANITIZE",
     "CUDA_PATH",
     "CUDA_HOME",
@@ -85,6 +86,8 @@ fn build_inputs() -> Inputs {
             cuda_cutlass: cfg!(feature = "cuda-cutlass"),
             triton_aot: cfg!(feature = "triton-aot"),
             vulkan: cfg!(feature = "vulkan"),
+            metal: cfg!(feature = "metal"),
+            mlx: cfg!(feature = "mlx"),
         },
         target: Target {
             triple: required_env("TARGET"),
@@ -94,6 +97,7 @@ fn build_inputs() -> Inputs {
         environment: Environment {
             cuda_architectures: env::var("VLLM_CPP_CUDA_ARCHITECTURES").ok(),
             cutlass_dir: env::var_os("VLLM_CPP_CUTLASS_DIR").map(PathBuf::from),
+            mlx_root: env::var_os("MLX_ROOT").map(PathBuf::from),
             sanitizer: env::var("VLLM_CPP_SANITIZE").ok(),
         },
     }
@@ -122,7 +126,8 @@ fn build_bundled(plan: &BuildPlan) -> PathBuf {
 
     let dynamic_link = cfg!(feature = "dynamic-link");
     let vllm_artifact = if dynamic_link {
-        shared_library_name("vllm")
+        shared_library_name("vllm", &required_env("CARGO_CFG_TARGET_OS"))
+            .unwrap_or_else(|error| config_error(error))
     } else {
         static_library_name("vllm")
     };
@@ -198,7 +203,8 @@ fn validate_system_root() -> PathBuf {
 fn link_system(root: &Path) {
     let dynamic_link = cfg!(feature = "dynamic-link");
     let vllm_artifact = if dynamic_link {
-        shared_library_name("vllm")
+        shared_library_name("vllm", &required_env("CARGO_CFG_TARGET_OS"))
+            .unwrap_or_else(|error| config_error(error))
     } else {
         static_library_name("vllm")
     };
@@ -274,6 +280,12 @@ fn emit_link_requirements(plan: &BuildPlan, cmake_cache: Option<&Path>) {
         match requirement {
             LinkRequirement::Library(name) => {
                 println!("cargo:rustc-link-lib=dylib={name}");
+            }
+            LinkRequirement::Framework(name) => {
+                println!("cargo:rustc-link-lib=framework={name}");
+            }
+            LinkRequirement::NativeSearch(path) => {
+                println!("cargo:rustc-link-search=native={}", path.display());
             }
             LinkRequirement::CudaToolkit(component) => {
                 let cache = cmake_cache.unwrap_or_else(|| {
