@@ -23,8 +23,12 @@
           packages = [
             rustToolchain
             pkgs.cmake
+            pkgs.git
+            pkgs.just
+            pkgs.jq
             pkgs.ninja
             pkgs.pkg-config
+            pkgs.gnutar
             pkgs.llvmPackages.clang
             pkgs.llvmPackages.bintools
             pkgs.rust-bindgen
