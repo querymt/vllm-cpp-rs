@@ -1,6 +1,13 @@
 use std::ffi::CString;
-use std::os::raw::c_char;
+use std::fmt;
+use std::mem::{align_of, size_of};
+use std::os::raw::{c_char, c_void};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+use std::slice;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, ThreadId};
 
 use vllm_cpp_sys as ffi;
 
@@ -9,13 +16,23 @@ use crate::error::{invalid_configuration, Error};
 const NATIVE_DEFAULT_MAX_TOKENS: u32 = 16;
 
 /// Native scheduler admission order.
+///
+/// Raw and serde chat request JSON can carry a `priority` field that the native
+/// OpenAI-compatible path parses and submits. Direct completion, completion
+/// streaming, and [`crate::Request`] submissions currently default to priority zero
+/// and tie by arrival; caller-selected priorities for those direct APIs require a
+/// future C ABI/API change.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SchedulerPolicy {
     /// Process requests in arrival order.
     #[default]
     Fcfs,
     /// Order requests by priority and then arrival time.
+    ///
+    /// This variant selects the native priority queue; it does not itself assign a
+    /// priority to a request.
     Priority,
+
     /// Prefer requests sharing the longest cached prefix.
     LongestPrefixMatch,
 }
@@ -52,6 +69,25 @@ impl Toggle {
     }
 }
 
+type DynLogitsProcessor = dyn Fn(&[i32], &mut [f32]) + Send + Sync + 'static;
+
+#[derive(Clone)]
+struct LogitsProcessor {
+    callback: Arc<DynLogitsProcessor>,
+}
+
+impl fmt::Debug for LogitsProcessor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LogitsProcessor { .. }")
+    }
+}
+
+impl PartialEq for LogitsProcessor {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.callback, &other.callback)
+    }
+}
+
 /// One engine-side structured decoding constraint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StructuredOutput {
@@ -78,6 +114,7 @@ pub struct SamplingParams {
     ignore_eos: bool,
     stop: Vec<String>,
     structured_output: Option<StructuredOutput>,
+    logits_processor: Option<LogitsProcessor>,
 }
 
 impl Default for SamplingParams {
@@ -96,6 +133,7 @@ impl Default for SamplingParams {
             ignore_eos: false,
             stop: Vec::new(),
             structured_output: None,
+            logits_processor: None,
         }
     }
 }
@@ -207,6 +245,33 @@ impl SamplingParams {
         self
     }
 
+    /// Installs a host-side processor that can inspect generated token IDs and
+    /// mutate one request's logits before each sampling step.
+    ///
+    /// The processor may run concurrently for different requests, so it must be
+    /// `Send + Sync`. Cloned parameters share the processor. A panic is contained
+    /// before the C boundary and reported as [`Error::LogitsProcessorPanicked`]
+    /// after the bounded generation call or from [`crate::Request::wait`]. Each
+    /// invocation retains its processor state until the parent engine is dropped
+    /// because ABI v10 has no sampler-quiescence primitive.
+    #[must_use]
+    pub fn logits_processor<F>(mut self, processor: F) -> Self
+    where
+        F: Fn(&[i32], &mut [f32]) + Send + Sync + 'static,
+    {
+        self.logits_processor = Some(LogitsProcessor {
+            callback: Arc::new(processor),
+        });
+        self
+    }
+
+    /// Removes a previously configured custom logits processor.
+    #[must_use]
+    pub fn clear_logits_processor(mut self) -> Self {
+        self.logits_processor = None;
+        self
+    }
+
     pub(crate) fn marshal(&self) -> Result<MarshaledSamplingParams, Error> {
         MarshaledSamplingParams::new(self)
     }
@@ -219,6 +284,7 @@ pub(crate) struct MarshaledSamplingParams {
     _structured_string: Option<CString>,
     _choices: Vec<CString>,
     _choice_pointers: Vec<*const c_char>,
+    logits_processor: Option<Arc<LogitsProcessorState>>,
 }
 
 impl MarshaledSamplingParams {
@@ -279,6 +345,19 @@ impl MarshaledSamplingParams {
             }
         }
 
+        let mut logits_processor = None;
+        if let Some(processor) = &params.logits_processor {
+            if params.max_tokens.is_none() || params.max_tokens == Some(0) {
+                return Err(invalid_configuration(
+                    "custom logits processors require bounded max_tokens because the native callback cannot abort generation",
+                ));
+            }
+            let state = Arc::new(LogitsProcessorState::new(Arc::clone(&processor.callback)));
+            raw.logits_processor = Some(logits_processor_trampoline);
+            raw.logits_processor_user_data = Arc::as_ptr(&state).cast_mut().cast();
+            logits_processor = Some(state);
+        }
+
         Ok(Self {
             raw,
             _stop: stop,
@@ -286,12 +365,160 @@ impl MarshaledSamplingParams {
             _structured_string: structured_string,
             _choices: choices,
             _choice_pointers: choice_pointers,
+            logits_processor,
         })
     }
 
     pub(crate) const fn raw(&self) -> &ffi::vllm_sampling_params {
         &self.raw
     }
+
+    pub(crate) fn logits_processor_error(&self) -> Option<Error> {
+        self.logits_processor
+            .as_deref()
+            .and_then(LogitsProcessorState::error)
+    }
+
+    pub(crate) fn logits_processor(&self) -> Option<Arc<LogitsProcessorState>> {
+        self.logits_processor.clone()
+    }
+
+    pub(crate) fn take_logits_processor(&mut self) -> Option<Arc<LogitsProcessorState>> {
+        self.logits_processor.take()
+    }
+}
+
+const PROCESSOR_OK: u8 = 0;
+const PROCESSOR_PANICKED: u8 = 1;
+const PROCESSOR_INVALID_INPUT: u8 = 2;
+
+pub(crate) struct LogitsProcessorState {
+    callback: Arc<DynLogitsProcessor>,
+    failure: AtomicU8,
+    active_threads: Mutex<Vec<ThreadId>>,
+}
+
+impl LogitsProcessorState {
+    fn new(callback: Arc<DynLogitsProcessor>) -> Self {
+        Self {
+            callback,
+            failure: AtomicU8::new(PROCESSOR_OK),
+            active_threads: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn error(&self) -> Option<Error> {
+        match self.failure.load(Ordering::Acquire) {
+            PROCESSOR_OK => None,
+            PROCESSOR_PANICKED => Some(Error::LogitsProcessorPanicked),
+            PROCESSOR_INVALID_INPUT => Some(Error::Runtime {
+                message: "native logits processor callback received invalid pointers or lengths"
+                    .to_owned(),
+            }),
+            _ => Some(Error::Runtime {
+                message: "native logits processor callback entered an unknown failure state"
+                    .to_owned(),
+            }),
+        }
+    }
+
+    pub(crate) fn is_active_on_current_thread(&self) -> bool {
+        let current = thread::current().id();
+        lock_unpoisoned(&self.active_threads).contains(&current)
+    }
+
+    fn record_failure(&self, failure: u8) {
+        let _ = self.failure.compare_exchange(
+            PROCESSOR_OK,
+            failure,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+struct ActiveProcessorGuard<'state> {
+    state: &'state LogitsProcessorState,
+    thread_id: ThreadId,
+}
+
+impl<'state> ActiveProcessorGuard<'state> {
+    fn enter(state: &'state LogitsProcessorState) -> Self {
+        let thread_id = thread::current().id();
+        lock_unpoisoned(&state.active_threads).push(thread_id);
+        Self { state, thread_id }
+    }
+}
+
+impl Drop for ActiveProcessorGuard<'_> {
+    fn drop(&mut self) {
+        let mut active = lock_unpoisoned(&self.state.active_threads);
+        if let Some(index) = active.iter().rposition(|id| *id == self.thread_id) {
+            active.swap_remove(index);
+        }
+    }
+}
+
+unsafe extern "C" fn logits_processor_trampoline(
+    token_ids: *const i32,
+    n_token_ids: i32,
+    logits: *mut f32,
+    vocab_size: i32,
+    user_data: *mut c_void,
+) {
+    if user_data.is_null() {
+        return;
+    }
+    // SAFETY: marshaling passes Arc-backed state. Engine entry points retain an
+    // Arc until native engine teardown joins the sampler worker.
+    let state = unsafe { &*user_data.cast::<LogitsProcessorState>() };
+    if state.failure.load(Ordering::Acquire) != PROCESSOR_OK {
+        return;
+    }
+    if n_token_ids < 0
+        || vocab_size <= 0
+        || (n_token_ids > 0 && token_ids.is_null())
+        || logits.is_null()
+        || (n_token_ids > 0 && !valid_slice_layout(token_ids, n_token_ids as usize))
+        || !valid_slice_layout(logits, vocab_size as usize)
+    {
+        state.record_failure(PROCESSOR_INVALID_INPUT);
+        return;
+    }
+
+    let _active = ActiveProcessorGuard::enter(state);
+    let tokens = if n_token_ids == 0 {
+        &[]
+    } else {
+        // SAFETY: the native callback contract lends this aligned token slice for
+        // this invocation, and the validated length fits Rust slice bounds.
+        unsafe { slice::from_raw_parts(token_ids, n_token_ids as usize) }
+    };
+    // SAFETY: the native callback contract lends this aligned, uniquely mutable
+    // logits row for this invocation, and the validated length fits slice bounds.
+    let logits = unsafe { slice::from_raw_parts_mut(logits, vocab_size as usize) };
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| (state.callback)(tokens, logits))) {
+        state.record_failure(PROCESSOR_PANICKED);
+        discard_panic_payload(payload);
+    }
+}
+
+fn valid_slice_layout<T>(pointer: *const T, length: usize) -> bool {
+    !pointer.is_null()
+        && (pointer as usize) % align_of::<T>() == 0
+        && length <= (isize::MAX as usize) / size_of::<T>()
+}
+
+fn discard_panic_payload(payload: Box<dyn std::any::Any + Send>) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
+        std::mem::forget(payload);
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub(crate) fn to_cstring(value: &str, field: &'static str) -> Result<CString, Error> {
@@ -327,4 +554,96 @@ fn u32_to_i32(value: u32, field: &'static str) -> Result<i32, Error> {
 
 fn length_to_i32(value: usize, field: &'static str) -> Result<i32, Error> {
     i32::try_from(value).map_err(|_| invalid_configuration(format!("too many {field}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{logits_processor_trampoline, SamplingParams};
+    use crate::Error;
+
+    #[test]
+    fn marshals_and_invokes_custom_logits_processor() {
+        let params = SamplingParams::default()
+            .max_tokens(2)
+            .logits_processor(|tokens, logits| {
+                assert_eq!(tokens, &[3, 5]);
+                logits[1] = 9.0;
+            });
+        let marshaled = params.marshal().expect("marshal processor");
+        let callback = marshaled
+            .raw()
+            .logits_processor
+            .expect("processor callback");
+        let mut logits = [1.0, 2.0, 3.0];
+        let tokens = [3, 5];
+        unsafe {
+            callback(
+                tokens.as_ptr(),
+                tokens.len() as i32,
+                logits.as_mut_ptr(),
+                logits.len() as i32,
+                marshaled.raw().logits_processor_user_data,
+            );
+        }
+        assert_eq!(logits, [1.0, 9.0, 3.0]);
+        assert_eq!(marshaled.logits_processor_error(), None);
+    }
+
+    #[test]
+    fn contains_processor_panic_and_skips_later_calls() {
+        let params = SamplingParams::default()
+            .max_tokens(2)
+            .logits_processor(|_, _| panic!("processor panic"));
+        let marshaled = params.marshal().expect("marshal processor");
+        let mut logits = [1.0, 2.0];
+        unsafe {
+            logits_processor_trampoline(
+                std::ptr::null(),
+                0,
+                logits.as_mut_ptr(),
+                logits.len() as i32,
+                marshaled.raw().logits_processor_user_data,
+            );
+        }
+        assert_eq!(
+            marshaled.logits_processor_error(),
+            Some(Error::LogitsProcessorPanicked)
+        );
+        unsafe {
+            logits_processor_trampoline(
+                std::ptr::null(),
+                0,
+                logits.as_mut_ptr(),
+                logits.len() as i32,
+                marshaled.raw().logits_processor_user_data,
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unbounded_processor_and_invalid_native_shape() {
+        let error = SamplingParams::default()
+            .unbounded()
+            .logits_processor(|_, _| {})
+            .marshal()
+            .err()
+            .expect("unbounded processor rejection");
+        assert!(matches!(error, Error::InvalidConfiguration { .. }));
+
+        let params = SamplingParams::default().logits_processor(|_, _| {});
+        let marshaled = params.marshal().expect("marshal processor");
+        unsafe {
+            logits_processor_trampoline(
+                std::ptr::null(),
+                -1,
+                std::ptr::null_mut(),
+                0,
+                marshaled.raw().logits_processor_user_data,
+            );
+        }
+        assert!(matches!(
+            marshaled.logits_processor_error(),
+            Some(Error::Runtime { .. })
+        ));
+    }
 }

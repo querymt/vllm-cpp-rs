@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - Checked-in raw Rust declarations for the 19-symbol stable vllm.cpp C API at ABI version 10, with header, symbol, layout, and runtime conformance checks.
-- A safe API for model loading, blocking completion and streaming, raw-JSON and optional serde chat, structured output, owned sampling parameters, and concurrent request submission, cancellation, waiting, and diagnostics.
+- A safe API for model loading, blocking completion and streaming, raw-JSON and optional serde chat, structured output, owned sampling parameters, panic-contained custom logits processors, native version diagnostics, and concurrent request submission, cancellation, waiting, and diagnostics.
 - An always-available synchronous `hf-hub` resolver for standalone GGUF files and runtime-complete sparse Safetensors snapshots, defaulting to the Hub's mutable `main` revision with an explicit branch/tag/commit override, cache/token/progress/offline controls, and no async runtime.
 - Consistent local, Hugging Face GGUF, and Hugging Face Safetensors model-source arguments across every runnable example, with cache reuse and optional revisions; plus a weather extraction example and model-backed test using JSON-Schema structured output.
 - A Clap-based interactive `chat` example with prompt/file startup input, retained system/user/assistant history, supported sampling controls, default streaming or blocking output, and shared local/Hugging Face resolution.
@@ -23,6 +23,8 @@ All notable changes to this project will be documented in this file.
 - The Rust crates are versioned together. `vllm-cpp` depends on exactly the matching `vllm-cpp-sys` version.
 
 ### Known limitations
+
+- The priority scheduler is selectable, and raw and serde chat request JSON can carry a `priority` field that the native OpenAI-compatible path parses and submits. Direct completion, completion streaming, and `Request` submissions currently default to priority zero and tie by arrival; caller-selected priorities for those direct APIs remain deferred until a future C ABI/API change.
 
 - The supported runtime tier is native Linux x86_64 CPU. Accelerator features are experimental build/configuration surfaces, not runtime-support claims.
 - Known native blockers include a CUDA teardown SIGSEGV after otherwise successful tests, a CUDA bf16 numerical tolerance failure, CUTLASS concurrent-output differences, incomplete Vulkan attention/model runtime, and external MLX deployment plus unvalidated release-lane model/runtime behavior.

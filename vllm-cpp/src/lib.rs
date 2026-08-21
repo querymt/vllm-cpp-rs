@@ -4,8 +4,9 @@
 //!
 //! Resolve a Hub model with [`HuggingFaceModel`] (default `main`, or an explicit
 //! revision), then create an [`Engine`] with [`Engine::load`] or configure native
-//! model settings through [`EngineBuilder`]. [`SamplingParams`] owns sampling, stop-string, and
-//! [`StructuredOutput`] settings for completion calls. The engine provides
+//! model settings through [`EngineBuilder`]. [`SamplingParams`] owns sampling,
+//! stop-string, [`StructuredOutput`] settings, and an optional host-side logits
+//! processor for completion calls. The engine provides
 //! blocking completion, streaming, raw-JSON chat, and [`Engine::submit`] for a
 //! concurrent [`Request`]. Enable `serde` for `serde_json::Value` chat helpers.
 //!
@@ -15,7 +16,9 @@
 //! native engine. Rust copies completion, stream, chat, and error text before
 //! native storage is freed or reused. Blocking callbacks may borrow caller data.
 //! Their panics are caught before the C boundary and resumed after the native
-//! call returns.
+//! call returns. Custom logits processors are `Send + Sync`, may run concurrently
+//! on native worker threads, and report contained panic through
+//! [`Error::LogitsProcessorPanicked`].
 //!
 //! A [`Request`] retains its engine and asynchronous callback until native
 //! free/join completes. Requests are `Send` but intentionally not `Sync`, while
@@ -28,7 +31,8 @@
 //! # ABI, linking, and deployment
 //!
 //! Engine loading requires the linked native library's ABI to equal
-//! [`expected_abi_version`] before versioned structs cross FFI. The default
+//! [`expected_abi_version`] before versioned structs cross FFI. [`version`] copies
+//! the linked library's diagnostic version string. The default
 //! `bundled` feature builds the pinned native source. `system` selects a
 //! caller-provided installation, `dynamic-link` selects shared linking, and
 //! `serde` adds typed JSON helpers. The non-optional `hf-hub` dependency provides
@@ -71,4 +75,25 @@ pub const fn expected_abi_version() -> i32 {
 pub fn abi_version() -> i32 {
     // SAFETY: this base ABI function takes no pointers and returns a plain i32.
     unsafe { vllm_cpp_sys::vllm_abi_version() }
+}
+
+/// Copies the version string reported by the linked vllm.cpp library.
+///
+/// This diagnostic does not replace [`abi_version`]: callers must still use the
+/// numeric ABI for compatibility decisions.
+pub fn version() -> Result<String, Error> {
+    // SAFETY: the base ABI returns a borrowed, process-lifetime C string.
+    let pointer = unsafe { vllm_cpp_sys::vllm_version() };
+    if pointer.is_null() {
+        return Err(Error::Runtime {
+            message: "vllm_version returned a null pointer".to_owned(),
+        });
+    }
+    // SAFETY: the native contract returns a live NUL-terminated string.
+    unsafe { std::ffi::CStr::from_ptr(pointer) }
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|_| Error::InvalidUtf8 {
+            field: "native version",
+        })
 }

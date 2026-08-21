@@ -60,8 +60,10 @@ pub enum Error {
     PathEncoding,
     /// Native code returned bytes that are not valid UTF-8.
     InvalidUtf8 { field: &'static str },
-    /// An asynchronous callback panicked.
+    /// An asynchronous output callback panicked.
     CallbackPanicked,
+    /// A custom logits processor panicked.
+    LogitsProcessorPanicked,
     /// A request operation was attempted from that request's callback thread.
     RequestCallbackThread { operation: &'static str },
     /// A Rust-side parameter cannot be represented by the native API.
@@ -93,6 +95,7 @@ impl fmt::Display for Error {
             Self::PathEncoding => write!(f, "path cannot be represented by the native API"),
             Self::InvalidUtf8 { field } => write!(f, "native {field} is not valid UTF-8"),
             Self::CallbackPanicked => write!(f, "asynchronous request callback panicked"),
+            Self::LogitsProcessorPanicked => write!(f, "custom logits processor panicked"),
             Self::RequestCallbackThread { operation } => {
                 write!(
                     f,
