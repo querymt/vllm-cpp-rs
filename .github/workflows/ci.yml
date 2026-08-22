@@ -135,7 +135,7 @@ jobs:
   package:
     needs: native
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out sources
         uses: actions/checkout@v4.4.0
@@ -148,6 +148,12 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build jq
+      - name: Install Just
+        uses: extractions/setup-just@v3.1.0
+        with:
+          just-version: "1.40.0"
+      - name: Test crate archives and downstream consumers
+        run: just package-test
       - name: Dry-run workspace publish
-        run: cargo publish --workspace --locked --dry-run
+        run: just publish-dry-run

@@ -16,7 +16,7 @@ Releases are prepared and published manually. The repository does not tag, publi
    test -z "$(git -C vllm-cpp-sys/vllm.cpp status --short --untracked-files=all)"
    ```
 
-3. Confirm the release version in the workspace manifest, both normalized package manifests, and `Cargo.lock`. Both crates must use the same version, and `vllm-cpp` must depend on exactly that `vllm-cpp-sys` version.
+3. Confirm the release version in the workspace manifest, both normalized package manifests, `Cargo.lock`, and the pinned native `project(vllm_cpp VERSION ...)` declaration. Both crates and the native CMake project must use the same version, and `vllm-cpp` must depend on exactly that `vllm-cpp-sys` version. The CMake project declaration is the native release version authority; do not derive the crate version from `git describe` or the nearest native tag.
 4. Confirm the native gitlink is `34aedfbe8ed9779697905541a62e2160ccfd9c05`, `VLLM_ABI_VERSION` is 10 in the pinned public C header and checked-in bindings, and generated bindings have no drift.
 5. Move the relevant entries from `Unreleased` to a dated version section. Describe only validated support; preserve known backend/runtime blockers.
 6. Audit dual-license metadata, crate license files, `NOTICE`, `THIRD_PARTY.md`, imported license texts, and the package inventory. Do not publish models, fixtures, build output, caches, SDKs, external CUTLASS trees, or repository-local paths.

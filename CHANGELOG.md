@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.0.1] - 2026-08-22
+
 ### Added
 
 - Checked-in raw Rust declarations for the 19-symbol stable vllm.cpp C API at ABI version 10, with header, symbol, layout, and runtime conformance checks.
