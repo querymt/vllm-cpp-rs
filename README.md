@@ -7,6 +7,8 @@ Rust bindings for [vllm.cpp](https://github.com/mudler/vllm.cpp), organized as:
 
 ## Status
 
+> **Work in progress:** these bindings track a pinned vllm.cpp revision and are still catching up with upstream development. APIs, supported features, and backend behavior may lag behind the latest vllm.cpp release; check the pinned commit and compatibility notes before adopting them.
+
 The safe crate provides a cloneable engine API for local model loading, blocking completion and streaming, non-blocking concurrent requests, structured output, and raw-JSON chat. It also provides an always-available synchronous Hugging Face resolver for standalone GGUF files and runtime-complete sparse Safetensors snapshots, plus a Clap-based interactive chat example using those APIs. An optional `serde` feature adds `serde_json::Value` chat helpers. The sys crate provides checked-in generated FFI declarations with C/Rust layout checks and coverage for all 19 exported C symbols.
 
 Linux x86_64 CPU builds support bundled static, bundled dynamic, system static, and system dynamic linking. Bundled CPU builds also target Linux aarch64 and Apple ARM64. Experimental bundled builds expose Linux x86_64/aarch64 build configuration for CUDA, external CUTLASS, Triton AOT, and Vulkan, plus Apple ARM64 Metal and external MLX configuration. Accelerator features are build integration surfaces, not runtime-support claims. vllm.cpp is pinned at `34aedfbe8ed9779697905541a62e2160ccfd9c05`, which exposes C ABI version 10.
