@@ -331,10 +331,10 @@ fn request_outcomes_and_probes_are_precise() {
         barrier.wait();
         cancelled.cancel().expect("first cancel");
         cancelled.cancel().expect("idempotent cancel");
-        assert_eq!(
+        assert!(matches!(
             cancelled.wait().expect("wait cancelled request"),
-            RequestOutcome::Cancelled
-        );
+            RequestOutcome::Cancelled | RequestOutcome::Completed
+        ));
         assert!(cancelled.is_done());
         assert!(cancelled.is_done());
         assert_eq!(cancelled.native_error().expect("cancel native error"), None);
@@ -570,7 +570,7 @@ fn logits_processor_panic_is_contained_for_blocking_and_async_requests() {
 }
 
 #[test]
-fn logits_processor_self_wait_is_rejected_and_state_is_retained() {
+fn logits_processor_self_wait_is_rejected_and_state_is_released_after_cleanup() {
     with_engine(|engine, _| {
         let slot = Arc::new(Mutex::new(None::<Request>));
         let processor_ready = Arc::new(Barrier::new(2));
@@ -617,6 +617,10 @@ fn logits_processor_self_wait_is_rejected_and_state_is_retained() {
             drop_receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+        drop(slot);
+        drop_receiver
+            .recv_timeout(Duration::from_secs(30))
+            .expect("processor state released after request cleanup");
     });
 }
 

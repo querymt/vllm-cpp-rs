@@ -372,6 +372,17 @@ package-test:
       echo "crate versions differ: sys=$version safe=$safe_version" >&2
       exit 1
     }
+    native_version=$(sed -nE \
+      's/^project\(vllm_cpp VERSION ([0-9]+\.[0-9]+\.[0-9]+) LANGUAGES CXX\)$/\1/p' \
+      "$repo_root/vllm-cpp-sys/vllm.cpp/CMakeLists.txt")
+    [[ -n $native_version ]] || {
+      echo 'could not read the native project version from vllm.cpp/CMakeLists.txt' >&2
+      exit 1
+    }
+    [[ $native_version == "$version" ]] || {
+      echo "native and crate versions differ: native=$native_version crates=$version" >&2
+      exit 1
+    }
     jq -e --arg version "$version" '
       [.packages[] | select(.name == "vllm-cpp" or .name == "vllm-cpp-sys")]
       | length == 2

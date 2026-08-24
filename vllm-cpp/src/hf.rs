@@ -16,6 +16,7 @@ const TOKENIZER_CONFIG: &str = "tokenizer_config.json";
 const SAFETENSORS: &str = "model.safetensors";
 const SAFETENSORS_INDEX: &str = "model.safetensors.index.json";
 const DEFAULT_REVISION: &str = "main";
+const HF_TOKEN: &str = "HF_TOKEN";
 
 /// A synchronous Hugging Face model resolver.
 ///
@@ -101,7 +102,9 @@ impl HuggingFaceModel {
         self
     }
 
-    /// Overrides the cached Hugging Face token for this resolver.
+    /// Sets the Hugging Face token for this resolver.
+    ///
+    /// An explicit token takes precedence over `HF_TOKEN` and the cached token.
     #[must_use]
     pub fn token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
@@ -166,10 +169,16 @@ impl HuggingFaceModel {
 
     fn api_builder(&self, cache: Cache) -> ApiBuilder {
         let builder = ApiBuilder::from_cache(cache).with_progress(self.progress);
-        match &self.token {
-            Some(token) => builder.with_token(Some(token.clone())),
+        match self.selected_token(std::env::var(HF_TOKEN).ok()) {
+            Some(token) => builder.with_token(Some(token)),
             None => builder,
         }
+    }
+
+    fn selected_token(&self, environment_token: Option<String>) -> Option<String> {
+        self.token
+            .clone()
+            .or_else(|| environment_token.filter(|token| !token.trim().is_empty()))
     }
 
     fn requested_repo(&self) -> Repo {
@@ -760,6 +769,22 @@ mod tests {
         let pinned = default_safetensors.revision(REVISION);
         assert_eq!(pinned.revision, REVISION);
         assert_eq!(pinned.requested_repo().revision(), REVISION);
+    }
+
+    #[test]
+    fn explicit_token_precedes_environment_token() {
+        let explicit = HuggingFaceModel::safetensors(REPO).token("explicit");
+        assert_eq!(
+            explicit.selected_token(Some("environment".to_owned())),
+            Some("explicit".to_owned())
+        );
+
+        let environment = HuggingFaceModel::safetensors(REPO);
+        assert_eq!(
+            environment.selected_token(Some("environment".to_owned())),
+            Some("environment".to_owned())
+        );
+        assert_eq!(environment.selected_token(Some("  ".to_owned())), None);
     }
 
     #[test]

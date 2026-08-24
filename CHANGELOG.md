@@ -4,11 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.0.1] - 2026-08-22
+
 ### Added
 
 - Checked-in raw Rust declarations for the 19-symbol stable vllm.cpp C API at ABI version 10, with header, symbol, layout, and runtime conformance checks.
-- A safe API for model loading, blocking completion and streaming, raw-JSON and optional serde chat, structured output, owned sampling parameters, panic-contained custom logits processors, native version diagnostics, and concurrent request submission, cancellation, waiting, and diagnostics.
-- An always-available synchronous `hf-hub` resolver for standalone GGUF files and runtime-complete sparse Safetensors snapshots, defaulting to the Hub's mutable `main` revision with an explicit branch/tag/commit override, cache/token/progress/offline controls, and no async runtime.
+- A safe API for model loading, blocking completion and streaming, raw-JSON and optional serde chat, structured output, owned sampling parameters, panic-contained custom logits processors with request-scoped callback state, native version diagnostics, and concurrent request submission, cancellation, waiting, and diagnostics.
+- An always-available synchronous `hf-hub` resolver for standalone GGUF files and runtime-complete sparse Safetensors snapshots, defaulting to the Hub's mutable `main` revision with an explicit branch/tag/commit override, explicit/`HF_TOKEN`/cached authentication precedence, cache/progress/offline controls, and no async runtime.
 - Consistent local, Hugging Face GGUF, and Hugging Face Safetensors model-source arguments across every runnable example, with cache reuse and optional revisions; plus a weather extraction example and model-backed test using JSON-Schema structured output.
 - A Clap-based interactive `chat` example with prompt/file startup input, retained system/user/assistant history, supported sampling controls, default streaming or blocking output, and shared local/Hugging Face resolution.
 - RAII ownership for native engines, requests, completions, and strings, including callback panic containment and callback-thread-safe deferred request cleanup.

@@ -13,7 +13,7 @@ use vllm_cpp_sys as ffi;
 use crate::callback::{StreamControl, StreamEvent};
 use crate::engine::{Engine, EngineInner};
 use crate::error::{status_result, Error};
-use crate::params::{to_cstring, LogitsProcessorState, SamplingParams};
+use crate::params::{to_cstring, LogitsProcessorRegistration, SamplingParams};
 
 /// How a successfully waited non-blocking request ended.
 ///
@@ -40,7 +40,7 @@ pub enum RequestOutcome {
 pub struct Request {
     raw: Option<NonNull<ffi::vllm_request>>,
     callback: Option<Box<AsyncCallbackState>>,
-    logits_processor: Option<Arc<LogitsProcessorState>>,
+    logits_processor: Option<LogitsProcessorRegistration>,
     engine: Option<Arc<EngineInner>>,
     cancellation_requested: bool,
     _not_sync: PhantomData<Cell<()>>,
@@ -74,9 +74,6 @@ impl Engine {
         cleanup_sender()?;
         let prompt = to_cstring(prompt, "prompt")?;
         let mut params = params.marshal()?;
-        if let Some(logits_processor) = params.logits_processor() {
-            self.retain_logits_processor(logits_processor);
-        }
         let mut callback = Box::new(AsyncCallbackState::new(callback));
         let mut output = ptr::null_mut();
         // SAFETY: the engine is retained by the returned Request, native code
@@ -213,16 +210,16 @@ impl Request {
 
     fn logits_processor_error(&self) -> Option<Error> {
         self.logits_processor
-            .as_deref()
-            .and_then(LogitsProcessorState::error)
+            .as_ref()
+            .and_then(LogitsProcessorRegistration::error)
     }
 
     fn is_native_callback_thread(&self) -> bool {
         self.callback().is_delivery_thread()
             || self
                 .logits_processor
-                .as_deref()
-                .is_some_and(LogitsProcessorState::is_active_on_current_thread)
+                .as_ref()
+                .is_some_and(LogitsProcessorRegistration::is_active_on_current_thread)
     }
 }
 
@@ -400,7 +397,7 @@ enum CleanupState {
     Armed {
         raw: NonNull<ffi::vllm_request>,
         callback: Box<AsyncCallbackState>,
-        logits_processor: Option<Arc<LogitsProcessorState>>,
+        logits_processor: Option<LogitsProcessorRegistration>,
         engine: Arc<EngineInner>,
     },
     Disarmed,
@@ -410,7 +407,7 @@ impl CleanupJob {
     fn new(
         raw: NonNull<ffi::vllm_request>,
         callback: Box<AsyncCallbackState>,
-        logits_processor: Option<Arc<LogitsProcessorState>>,
+        logits_processor: Option<LogitsProcessorRegistration>,
         engine: Arc<EngineInner>,
     ) -> Self {
         Self {
@@ -441,8 +438,8 @@ impl CleanupJob {
                 } => {
                     callback.is_delivery_thread()
                         || logits_processor
-                            .as_deref()
-                            .is_some_and(LogitsProcessorState::is_active_on_current_thread)
+                            .as_ref()
+                            .is_some_and(LogitsProcessorRegistration::is_active_on_current_thread)
                 }
                 CleanupState::Disarmed => return,
             },
@@ -480,11 +477,10 @@ impl CleanupJob {
         // callback context. New native user_data entrypoints must join this tracking.
         //
         // SAFETY: this job owns the request once and retains its callback and engine.
-        // Native free joins output delivery. EngineInner separately retains every
-        // logits state until engine teardown joins the sampler worker.
+        // Native free cancels the request and joins output delivery before the logits
+        // processor registration is removed.
         unsafe { ffi::vllm_request_free(raw.as_ptr()) };
-        // SAFETY: output delivery is joined. Dropping this request-owned Arc is safe
-        // because EngineInner retains another Arc until native engine teardown.
+        // SAFETY: output delivery and native request teardown are complete.
         let (callback, logits_processor, engine) =
             unsafe { std::mem::ManuallyDrop::take(&mut owners) };
         // User callback captures and a stored panic payload can have arbitrary

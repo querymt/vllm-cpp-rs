@@ -23,6 +23,7 @@ jobs:
       - name: Check out exact sources
         uses: actions/checkout@v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Verify checkout and native pin
         shell: bash
@@ -52,6 +53,7 @@ jobs:
       - name: Check out exact sources
         uses: actions/checkout@v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Verify checkout, native pin, and host
         shell: bash
@@ -76,6 +78,7 @@ jobs:
       - name: Check out exact sources
         uses: actions/checkout@v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Verify checkout, native pin, and host
         shell: bash
@@ -102,6 +105,7 @@ jobs:
       - name: Check out exact sources
         uses: actions/checkout@v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Verify checkout, native pin, and Metal toolchain
         shell: bash
@@ -131,6 +135,7 @@ jobs:
       - name: Check out exact sources
         uses: actions/checkout@v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Verify checkout and native pin
         shell: bash
