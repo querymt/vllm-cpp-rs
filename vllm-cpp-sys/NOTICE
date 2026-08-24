@@ -15,6 +15,10 @@ ports, and/or vendors code from third-party projects, including:
   - Marlin / GPTQ-Marlin mixed-precision kernels (Apache-2.0), as vendored
     by vLLM under src/vt/cuda/marlin/.
   - NVIDIA CUTLASS (BSD-3-Clause) — used for FP4/FP8 GEMM kernels.
+  - FlashAttention-2 (BSD-3-Clause) — vendored CUDA attention sources under
+    src/vt/cuda/flash_attn/.
+  - Flash Linear Attention (MIT) — vendored Triton kernel sources under
+    triton_kernels/.
   - xgrammar (Apache-2.0) — C++ grammar core, vendored for structured output.
   - cpp-httplib (MIT) and nlohmann/json (MIT) — header-only dependencies.
   - google/minja (MIT) - header-only Jinja engine vendored under

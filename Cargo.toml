@@ -3,11 +3,11 @@ members = ["vllm-cpp", "vllm-cpp-sys"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/querymt/vllm-cpp-rs"
 rust-version = "1.85"
 
 [workspace.dependencies]
-vllm-cpp-sys = { version = "=0.1.0", path = "vllm-cpp-sys", default-features = false }
+vllm-cpp-sys = { version = "=0.0.1", path = "vllm-cpp-sys", default-features = false }

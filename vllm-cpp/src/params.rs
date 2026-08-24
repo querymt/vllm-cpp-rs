@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fmt;
 use std::mem::{align_of, size_of};
@@ -5,8 +6,8 @@ use std::os::raw::{c_char, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::{self, ThreadId};
 
 use vllm_cpp_sys as ffi;
@@ -169,12 +170,17 @@ impl SamplingParams {
         self
     }
 
+    /// Sets a finite generation limit.
+    ///
+    /// Zero is invalid; use [`unbounded`](Self::unbounded) to request native
+    /// unbounded generation explicitly.
     #[must_use]
     pub fn max_tokens(mut self, value: u32) -> Self {
         self.max_tokens = Some(value);
         self
     }
 
+    /// Removes the generation limit.
     #[must_use]
     pub fn unbounded(mut self) -> Self {
         self.max_tokens = None;
@@ -251,9 +257,9 @@ impl SamplingParams {
     /// The processor may run concurrently for different requests, so it must be
     /// `Send + Sync`. Cloned parameters share the processor. A panic is contained
     /// before the C boundary and reported as [`Error::LogitsProcessorPanicked`]
-    /// after the bounded generation call or from [`crate::Request::wait`]. Each
-    /// invocation retains its processor state until the parent engine is dropped
-    /// because ABI v10 has no sampler-quiescence primitive.
+    /// after the bounded generation call or from [`crate::Request::wait`]. The
+    /// callback state remains registered through the call or request lifetime;
+    /// stale native invocations after cleanup become no-ops.
     #[must_use]
     pub fn logits_processor<F>(mut self, processor: F) -> Self
     where
@@ -284,7 +290,7 @@ pub(crate) struct MarshaledSamplingParams {
     _structured_string: Option<CString>,
     _choices: Vec<CString>,
     _choice_pointers: Vec<*const c_char>,
-    logits_processor: Option<Arc<LogitsProcessorState>>,
+    logits_processor: Option<LogitsProcessorRegistration>,
 }
 
 impl MarshaledSamplingParams {
@@ -352,10 +358,10 @@ impl MarshaledSamplingParams {
                     "custom logits processors require bounded max_tokens because the native callback cannot abort generation",
                 ));
             }
-            let state = Arc::new(LogitsProcessorState::new(Arc::clone(&processor.callback)));
+            let registration = LogitsProcessorRegistration::new(Arc::clone(&processor.callback));
             raw.logits_processor = Some(logits_processor_trampoline);
-            raw.logits_processor_user_data = Arc::as_ptr(&state).cast_mut().cast();
-            logits_processor = Some(state);
+            raw.logits_processor_user_data = registration.user_data();
+            logits_processor = Some(registration);
         }
 
         Ok(Self {
@@ -375,15 +381,11 @@ impl MarshaledSamplingParams {
 
     pub(crate) fn logits_processor_error(&self) -> Option<Error> {
         self.logits_processor
-            .as_deref()
-            .and_then(LogitsProcessorState::error)
+            .as_ref()
+            .and_then(LogitsProcessorRegistration::error)
     }
 
-    pub(crate) fn logits_processor(&self) -> Option<Arc<LogitsProcessorState>> {
-        self.logits_processor.clone()
-    }
-
-    pub(crate) fn take_logits_processor(&mut self) -> Option<Arc<LogitsProcessorState>> {
+    pub(crate) fn take_logits_processor(&mut self) -> Option<LogitsProcessorRegistration> {
         self.logits_processor.take()
     }
 }
@@ -392,7 +394,55 @@ const PROCESSOR_OK: u8 = 0;
 const PROCESSOR_PANICKED: u8 = 1;
 const PROCESSOR_INVALID_INPUT: u8 = 2;
 
-pub(crate) struct LogitsProcessorState {
+static NEXT_PROCESSOR_ID: AtomicUsize = AtomicUsize::new(1);
+static LOGITS_PROCESSORS: OnceLock<Mutex<HashMap<usize, Weak<LogitsProcessorState>>>> =
+    OnceLock::new();
+
+pub(crate) struct LogitsProcessorRegistration {
+    id: usize,
+    state: Arc<LogitsProcessorState>,
+}
+
+impl LogitsProcessorRegistration {
+    fn new(callback: Arc<DynLogitsProcessor>) -> Self {
+        let id = NEXT_PROCESSOR_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .unwrap_or_else(|_| std::process::abort());
+        let state = Arc::new(LogitsProcessorState::new(callback));
+        lock_unpoisoned(logits_processor_registry()).insert(id, Arc::downgrade(&state));
+        Self { id, state }
+    }
+
+    fn user_data(&self) -> *mut c_void {
+        ptr::without_provenance_mut(self.id)
+    }
+
+    pub(crate) fn error(&self) -> Option<Error> {
+        self.state.error()
+    }
+
+    pub(crate) fn is_active_on_current_thread(&self) -> bool {
+        self.state.is_active_on_current_thread()
+    }
+}
+
+impl Drop for LogitsProcessorRegistration {
+    fn drop(&mut self) {
+        lock_unpoisoned(logits_processor_registry()).remove(&self.id);
+    }
+}
+
+fn logits_processor_registry() -> &'static Mutex<HashMap<usize, Weak<LogitsProcessorState>>> {
+    LOGITS_PROCESSORS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn registered_logits_processor(id: usize) -> Option<Arc<LogitsProcessorState>> {
+    lock_unpoisoned(logits_processor_registry())
+        .get(&id)
+        .and_then(Weak::upgrade)
+}
+
+struct LogitsProcessorState {
     callback: Arc<DynLogitsProcessor>,
     failure: AtomicU8,
     active_threads: Mutex<Vec<ThreadId>>,
@@ -469,9 +519,9 @@ unsafe extern "C" fn logits_processor_trampoline(
     if user_data.is_null() {
         return;
     }
-    // SAFETY: marshaling passes Arc-backed state. Engine entry points retain an
-    // Arc until native engine teardown joins the sampler worker.
-    let state = unsafe { &*user_data.cast::<LogitsProcessorState>() };
+    let Some(state) = registered_logits_processor(user_data.addr()) else {
+        return;
+    };
     if state.failure.load(Ordering::Acquire) != PROCESSOR_OK {
         return;
     }
@@ -486,7 +536,7 @@ unsafe extern "C" fn logits_processor_trampoline(
         return;
     }
 
-    let _active = ActiveProcessorGuard::enter(state);
+    let _active = ActiveProcessorGuard::enter(&state);
     let tokens = if n_token_ids == 0 {
         &[]
     } else {
@@ -542,8 +592,11 @@ fn pointer_or_null(values: &[*const c_char]) -> *const *const c_char {
 
 fn optional_u32_to_i32(value: Option<u32>, field: &'static str) -> Result<i32, Error> {
     match value {
-        Some(0) | None => Ok(0),
+        Some(0) => Err(invalid_configuration(format!(
+            "{field} must be greater than zero; use unbounded() for no limit"
+        ))),
         Some(value) => u32_to_i32(value, field),
+        None => Ok(0),
     }
 }
 
@@ -560,6 +613,8 @@ fn length_to_i32(value: usize, field: &'static str) -> Result<i32, Error> {
 mod tests {
     use super::{logits_processor_trampoline, SamplingParams};
     use crate::Error;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn marshals_and_invokes_custom_logits_processor() {
@@ -587,6 +642,32 @@ mod tests {
         }
         assert_eq!(logits, [1.0, 9.0, 3.0]);
         assert_eq!(marshaled.logits_processor_error(), None);
+    }
+
+    #[test]
+    fn stale_processor_user_data_is_a_noop() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let user_data = {
+            let calls = Arc::clone(&calls);
+            let params = SamplingParams::default()
+                .max_tokens(1)
+                .logits_processor(move |_, _| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                });
+            let marshaled = params.marshal().expect("marshal processor");
+            marshaled.raw().logits_processor_user_data
+        };
+        let mut logits = [1.0];
+        unsafe {
+            logits_processor_trampoline(
+                std::ptr::null(),
+                0,
+                logits.as_mut_ptr(),
+                logits.len() as i32,
+                user_data,
+            );
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -621,14 +702,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unbounded_processor_and_invalid_native_shape() {
-        let error = SamplingParams::default()
-            .unbounded()
-            .logits_processor(|_, _| {})
-            .marshal()
-            .err()
-            .expect("unbounded processor rejection");
-        assert!(matches!(error, Error::InvalidConfiguration { .. }));
+    fn rejects_zero_or_unbounded_processor_and_invalid_native_shape() {
+        for params in [
+            SamplingParams::default().max_tokens(0),
+            SamplingParams::default()
+                .unbounded()
+                .logits_processor(|_, _| {}),
+        ] {
+            let error = params.marshal().err().expect("invalid bounds rejection");
+            assert!(matches!(error, Error::InvalidConfiguration { .. }));
+        }
 
         let params = SamplingParams::default().logits_processor(|_, _| {});
         let marshaled = params.marshal().expect("marshal processor");
