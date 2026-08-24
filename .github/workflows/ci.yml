@@ -24,6 +24,8 @@ jobs:
     steps:
       - name: Check out sources
         uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,6 +44,7 @@ jobs:
       - name: Check out sources
         uses: actions/checkout@v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -68,6 +71,7 @@ jobs:
       - name: Check out sources
         uses: actions/checkout@v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -92,6 +96,7 @@ jobs:
       - name: Check out sources
         uses: actions/checkout@v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -112,6 +117,7 @@ jobs:
       - name: Check out sources
         uses: actions/checkout@v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -140,6 +146,7 @@ jobs:
       - name: Check out sources
         uses: actions/checkout@v4.4.0
         with:
+          persist-credentials: false
           submodules: recursive
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

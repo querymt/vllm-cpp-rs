@@ -3,7 +3,7 @@ use std::mem::MaybeUninit;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use vllm_cpp_sys as ffi;
 
@@ -11,7 +11,7 @@ use crate::callback::{
     callback_trampoline, CallbackState, StreamControl, StreamEvent, StreamOutcome,
 };
 use crate::error::{invalid_configuration, status_result, Error};
-use crate::params::{LogitsProcessorState, SamplingParams, SchedulerPolicy, Toggle};
+use crate::params::{SamplingParams, SchedulerPolicy, Toggle};
 
 /// A cloneable vllm.cpp serving engine.
 #[derive(Clone)]
@@ -21,7 +21,6 @@ pub struct Engine {
 
 pub(crate) struct EngineInner {
     pub(crate) raw: NonNull<ffi::vllm_engine>,
-    logits_processors: Mutex<Vec<Arc<LogitsProcessorState>>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -75,14 +74,6 @@ pub struct Completion {
 }
 
 impl Engine {
-    pub(crate) fn retain_logits_processor(&self, state: Arc<LogitsProcessorState>) {
-        self.inner
-            .logits_processors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(state);
-    }
-
     /// Starts configuring an engine for a model directory or GGUF file.
     pub fn builder(model_path: impl Into<PathBuf>) -> EngineBuilder {
         EngineBuilder::new(model_path)
@@ -97,9 +88,6 @@ impl Engine {
     pub fn complete(&self, prompt: &str, params: &SamplingParams) -> Result<Completion, Error> {
         let prompt = to_cstring(prompt, "prompt")?;
         let params = params.marshal()?;
-        if let Some(logits_processor) = params.logits_processor() {
-            self.retain_logits_processor(logits_processor);
-        }
         let mut raw = MaybeUninit::<ffi::vllm_completion>::uninit();
         // SAFETY: the engine is owned and live, all pointers remain valid for the
         // call, and out storage is initialized by native code on success.
@@ -142,9 +130,6 @@ impl Engine {
     {
         let prompt = to_cstring(prompt, "prompt")?;
         let params = params.marshal()?;
-        if let Some(logits_processor) = params.logits_processor() {
-            self.retain_logits_processor(logits_processor);
-        }
         let mut state = CallbackState::new(&mut callback);
         // SAFETY: state has a stable stack address for this blocking call; the C
         // API does not retain user_data after returning.
@@ -238,8 +223,7 @@ impl Engine {
 impl Drop for EngineInner {
     fn drop(&mut self) {
         // SAFETY: EngineInner exclusively owns this live handle. Native teardown
-        // joins engine workers before retained logits states drop with the other
-        // fields, so no callback can outlive its user_data.
+        // joins engine workers before returning.
         unsafe { ffi::vllm_engine_free(self.raw.as_ptr()) };
     }
 }
@@ -405,10 +389,7 @@ impl EngineBuilder {
             message: "vllm_engine_load succeeded without a handle".to_owned(),
         })?;
         Ok(Engine {
-            inner: Arc::new(EngineInner {
-                raw,
-                logits_processors: Mutex::new(Vec::new()),
-            }),
+            inner: Arc::new(EngineInner { raw }),
         })
     }
 }
