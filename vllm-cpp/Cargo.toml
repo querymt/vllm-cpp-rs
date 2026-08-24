@@ -8,7 +8,7 @@ rust-version.workspace = true
 description = "Safe model inference, streaming, chat, and concurrent requests for vllm.cpp"
 readme = "README.md"
 documentation = "https://docs.rs/vllm-cpp"
-keywords = ["llm", "inference", "ffi", "vllm", "machine-learning"]
+keywords = ["llm", "inference", "vllm", "vllm-cpp", "machine-learning"]
 categories = ["api-bindings", "science"]
 
 [features]
