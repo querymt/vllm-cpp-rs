@@ -4,7 +4,7 @@ Raw Rust bindings and native linking for the stable C API of [vllm.cpp](https://
 
 This crate exposes checked-in generated unsafe declarations for the 35 exported C symbols in ABI version 17. Callers are responsible for pointer validity, lifetimes, callback threading, status/error handling, and matching every native allocation with its documented free function. Applications should prefer the current safe [`vllm-cpp`](https://docs.rs/vllm-cpp) crate unless they require direct ABI access. Ordinary consumers do not need Just, bindgen, or libclang.
 
-The package contains Rust declarations and conformance tests, native build/link integration, the pinned native source inputs required by the supported feature set, and their licenses/notices. It excludes upstream tests, fixtures, models, examples, benchmarks, agent records, fetched SDKs, external CUTLASS trees, and build output. See the repository [changelog](https://github.com/querymt/vllm-cpp-rs/blob/main/CHANGELOG.md) and [release process](https://github.com/querymt/vllm-cpp-rs/blob/main/RELEASING.md) for the coordinated crate boundary.
+The package contains Rust declarations and conformance tests, native build/link integration, the pinned native source inputs required by the supported feature set, and their licenses/notices. It excludes upstream test trees except for one unconditional ROCm syntax-check translation unit, plus fixtures, models, examples, benchmarks, agent records, fetched SDKs, external CUTLASS trees, and build output. See the repository [changelog](https://github.com/querymt/vllm-cpp-rs/blob/main/CHANGELOG.md) and [release process](https://github.com/querymt/vllm-cpp-rs/blob/main/RELEASING.md) for the coordinated crate boundary.
 
 ## Link Modes
 
@@ -28,12 +28,14 @@ Feature selection is build configuration, not runtime or hardware evidence. Acce
 |---|---|---|
 | `cuda` | Linux x86_64/aarch64; requires exact `VLLM_CPP_CUDA_ARCHITECTURES` | Static mode links CMake's exact `CUDA_CUDART` and `CUDA_cublasLt_LIBRARY` results; dynamic mode relies on `libvllm.so` dependencies |
 | `cuda-cutlass` | Implies CUDA; requires canonical `VLLM_CPP_CUTLASS_DIR` with CUTLASS >=4.5.0; fetch is OFF; `103a`/`110` rejected | Header-only external input |
-| `triton-aot` | Implies CUDA; checked-in single-architecture artifacts only; regeneration is OFF | Static mode also links CMake's exact `CUDA_cuda_driver_LIBRARY`; dynamic mode relies on `libvllm.so` |
+| `triton-aot` | Implies CUDA; embeds all six checked-in AOT trees; regeneration is OFF | Static mode also links CMake's exact `CUDA_cuda_driver_LIBRARY`; dynamic mode relies on `libvllm.so` |
 | `vulkan` | Linux x86_64/aarch64; packaged Khronos headers and checked-in SPIR-V | No Vulkan SDK link; runtime loader uses `dlopen` |
 | `metal` | Exact `aarch64-apple-darwin`; native MSL backend | Static mode links `c++`, then `Metal` and `Foundation` frameworks |
 | `mlx` | Implies Metal; requires canonical external `MLX_ROOT` with `include/mlx/array.h`, `lib/libmlx.dylib`, and `lib/mlx.metallib` | Static mode adds `$MLX_ROOT/lib` before `dylib=mlx`; no rpath or packaged MLX payload |
 
-CUDA architectures are exactly `80`, `86`, `87`, `89`, `90a`, `100a`, `103a`, `110`, `120a`, `121a`, or `120a;121a`. Triton accepts only `80`, `86`, `89`, `90a`, `100a`, or `121a`. Plain CUDA passes a nonexistent CUTLASS root to CMake so ambient source cannot silently change the build. Use separate `CARGO_TARGET_DIR` values for each backend/link combination.
+CUDA architectures are exactly `80`, `86`, `87`, `89`, `90a`, `100a`, `103a`, `110`, `120a`, `121a`, or `120a;121a`. `triton-aot` accepts every one of those values, including the fat `120a;121a` build, and embeds the complete `sm_80`, `sm_86`, `sm_89`, `sm_90a`, `sm_100a`, and `sm_121a` vendored set. Runtime dispatch selects only an exact-SM cubin; architectures without an exact tree use the portable CUDA path rather than a neighboring cubin. Plain CUDA passes a nonexistent CUTLASS root to CMake so ambient source cannot silently change the build. Use separate `CARGO_TARGET_DIR` values for each backend/link combination.
+
+Cargo builds explicitly disable HIP/ROCm, Tenstorrent, NCCL, native tests/examples, and the HTTP server. CUTLASS fetching and Triton regeneration remain OFF, so supported bundled builds never download native inputs. Marlin and FlashAttention remain explicitly enabled when their CUDA architecture and external CUTLASS prerequisites are satisfied.
 
 Metal and MLX remain bundled-only and do not imply `bundled`; `--no-default-features` callers must explicitly select `bundled,metal` or `bundled,mlx`. Setting `MLX_ROOT` without `mlx` is rejected. MLX is never downloaded, copied, or packaged, and applications are responsible for making `libmlx.dylib` and its metallib deployment visible at runtime.
 

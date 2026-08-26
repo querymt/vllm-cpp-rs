@@ -17,8 +17,6 @@ const CUDA_ARCHITECTURES: &[&str] = &[
     "121a",
     "120a;121a",
 ];
-const TRITON_ARCHITECTURES: &[&str] = &["80", "86", "89", "90a", "100a", "121a"];
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Features {
     pub bundled: bool,
@@ -172,12 +170,21 @@ pub fn plan(inputs: &Inputs, probe: &impl PathProbe) -> Result<BuildPlan, Config
         ("VLLM_CPP_BUILD_TESTS", "OFF".to_owned()),
         ("VLLM_CPP_BUILD_EXAMPLES", "OFF".to_owned()),
         ("VLLM_CPP_SERVER", "OFF".to_owned()),
+        ("VLLM_CPP_HIP", "OFF".to_owned()),
+        ("VLLM_CPP_TENSTORRENT", "OFF".to_owned()),
+        ("VLLM_CPP_LITERAL_STATIC", "OFF".to_owned()),
+        ("VLLM_CPP_BENCH_PROFILE_CONTROL", "OFF".to_owned()),
+        ("VLLM_CPP_NCCL", "OFF".to_owned()),
+        ("VLLM_CPP_MARLIN", "ON".to_owned()),
+        ("VLLM_CPP_FLASH_ATTN", "ON".to_owned()),
         ("VLLM_CPP_CUDA", on_off(inputs.features.cuda)),
         ("VLLM_CPP_METAL", on_off(inputs.features.metal)),
         ("VLLM_CPP_VULKAN", on_off(inputs.features.vulkan)),
         ("VLLM_CPP_MLX", on_off(inputs.features.mlx)),
         ("VLLM_CPP_TRITON", on_off(inputs.features.triton_aot)),
         ("VLLM_CPP_TRITON_REGEN", "OFF".to_owned()),
+        ("VLLM_CPP_TRITON_VENDORED_ARCH", String::new()),
+        ("VLLM_CPP_TRITON_TARGET", String::new()),
         ("VLLM_CPP_CUTLASS_FETCH", "OFF".to_owned()),
         ("VLLM_CPP_SANITIZE", sanitizer.to_owned()),
     ];
@@ -307,12 +314,6 @@ fn validate_cuda(inputs: &Inputs) -> Result<Option<String>, ConfigError> {
         return Err(ConfigError::new(format!(
             "unsupported VLLM_CPP_CUDA_ARCHITECTURES={architectures:?}; supported values are {}",
             CUDA_ARCHITECTURES.join(", ")
-        )));
-    }
-    if inputs.features.triton_aot && !TRITON_ARCHITECTURES.contains(&architectures) {
-        return Err(ConfigError::new(format!(
-            "`triton-aot` requires one vendored single architecture: {}; got {architectures:?}",
-            TRITON_ARCHITECTURES.join(", ")
         )));
     }
     Ok(Some(architectures.to_owned()))

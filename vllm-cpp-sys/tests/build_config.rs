@@ -132,23 +132,50 @@ fn error(inputs: &Inputs, probe: &MockProbe) -> String {
     plan(inputs, probe).unwrap_err().to_string()
 }
 
+fn deterministic_defines(
+    cuda: &str,
+    metal: &str,
+    vulkan: &str,
+    mlx: &str,
+    triton: &str,
+    sanitizer: &str,
+) -> Vec<(&'static str, String)> {
+    [
+        ("VLLM_CPP_BUILD_TESTS", "OFF"),
+        ("VLLM_CPP_BUILD_EXAMPLES", "OFF"),
+        ("VLLM_CPP_SERVER", "OFF"),
+        ("VLLM_CPP_HIP", "OFF"),
+        ("VLLM_CPP_TENSTORRENT", "OFF"),
+        ("VLLM_CPP_LITERAL_STATIC", "OFF"),
+        ("VLLM_CPP_BENCH_PROFILE_CONTROL", "OFF"),
+        ("VLLM_CPP_NCCL", "OFF"),
+        ("VLLM_CPP_MARLIN", "ON"),
+        ("VLLM_CPP_FLASH_ATTN", "ON"),
+        ("VLLM_CPP_CUDA", cuda),
+        ("VLLM_CPP_METAL", metal),
+        ("VLLM_CPP_VULKAN", vulkan),
+        ("VLLM_CPP_MLX", mlx),
+        ("VLLM_CPP_TRITON", triton),
+        ("VLLM_CPP_TRITON_REGEN", "OFF"),
+        ("VLLM_CPP_TRITON_VENDORED_ARCH", ""),
+        ("VLLM_CPP_TRITON_TARGET", ""),
+        ("VLLM_CPP_CUTLASS_FETCH", "OFF"),
+        ("VLLM_CPP_SANITIZE", sanitizer),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name, value.to_owned()))
+    .collect()
+}
+
 #[test]
 fn cpu_and_vulkan_plans_are_deterministic() {
     let cpu = plan(&linux(), &MockProbe::default()).unwrap();
     let arm_cpu = plan(&linux_arm64(), &MockProbe::default()).unwrap();
     assert_eq!(arm_cpu, cpu);
-    assert!(cpu
-        .cmake_defines
-        .contains(&("VLLM_CPP_CUDA", "OFF".to_owned())));
-    assert!(cpu
-        .cmake_defines
-        .contains(&("VLLM_CPP_VULKAN", "OFF".to_owned())));
-    assert!(cpu
-        .cmake_defines
-        .contains(&("VLLM_CPP_METAL", "OFF".to_owned())));
-    assert!(cpu
-        .cmake_defines
-        .contains(&("VLLM_CPP_MLX", "OFF".to_owned())));
+    assert_eq!(
+        cpu.cmake_defines,
+        deterministic_defines("OFF", "OFF", "OFF", "OFF", "OFF", "OFF")
+    );
     assert!(!cpu
         .cmake_defines
         .iter()
@@ -167,31 +194,28 @@ fn cpu_and_vulkan_plans_are_deterministic() {
     let first = plan(&vulkan, &MockProbe::default()).unwrap();
     let second = plan(&vulkan, &MockProbe::default()).unwrap();
     assert_eq!(first, second);
-    assert!(first
-        .cmake_defines
-        .contains(&("VLLM_CPP_VULKAN", "ON".to_owned())));
+    assert_eq!(
+        first.cmake_defines,
+        deterministic_defines("OFF", "OFF", "ON", "OFF", "OFF", "OFF")
+    );
 }
 
 #[test]
 fn apple_cpu_metal_and_mlx_plans_are_deterministic() {
     let cpu = plan(&apple(), &MockProbe::default()).unwrap();
+    assert_eq!(
+        cpu.cmake_defines,
+        deterministic_defines("OFF", "OFF", "OFF", "OFF", "OFF", "OFF")
+    );
     assert_eq!(cpu.link_requirements, vec![LinkRequirement::Library("c++")]);
-    assert!(cpu
-        .cmake_defines
-        .contains(&("VLLM_CPP_METAL", "OFF".to_owned())));
-    assert!(cpu
-        .cmake_defines
-        .contains(&("VLLM_CPP_MLX", "OFF".to_owned())));
 
     let mut metal = apple();
     metal.features.metal = true;
     let metal_plan = plan(&metal, &MockProbe::default()).unwrap();
-    assert!(metal_plan
-        .cmake_defines
-        .contains(&("VLLM_CPP_METAL", "ON".to_owned())));
-    assert!(metal_plan
-        .cmake_defines
-        .contains(&("VLLM_CPP_MLX", "OFF".to_owned())));
+    assert_eq!(
+        metal_plan.cmake_defines,
+        deterministic_defines("OFF", "ON", "OFF", "OFF", "OFF", "OFF")
+    );
     assert_eq!(
         metal_plan.link_requirements,
         vec![
@@ -205,12 +229,9 @@ fn apple_cpu_metal_and_mlx_plans_are_deterministic() {
     mlx.features.mlx = true;
     mlx.environment.mlx_root = Some(PathBuf::from("mlx"));
     let mlx_plan = plan(&mlx, &MockProbe::mlx()).unwrap();
-    assert!(mlx_plan
-        .cmake_defines
-        .contains(&("VLLM_CPP_MLX", "ON".to_owned())));
-    assert!(mlx_plan
-        .cmake_defines
-        .contains(&("MLX_ROOT", "/mlx".to_owned())));
+    let mut expected_mlx = deterministic_defines("OFF", "ON", "OFF", "ON", "OFF", "OFF");
+    expected_mlx.push(("MLX_ROOT", "/mlx".to_owned()));
+    assert_eq!(mlx_plan.cmake_defines, expected_mlx);
     assert_eq!(
         mlx_plan.link_requirements,
         vec![
@@ -225,9 +246,7 @@ fn apple_cpu_metal_and_mlx_plans_are_deterministic() {
     mlx.features.dynamic_link = true;
     let dynamic_mlx = plan(&mlx, &MockProbe::mlx()).unwrap();
     assert!(dynamic_mlx.link_requirements.is_empty());
-    assert!(dynamic_mlx
-        .cmake_defines
-        .contains(&("MLX_ROOT", "/mlx".to_owned())));
+    assert_eq!(dynamic_mlx.cmake_defines, expected_mlx);
 }
 
 #[test]
@@ -483,32 +502,41 @@ fn cuda_cache_keys_match_find_cudatoolkit() {
 }
 
 #[test]
-fn triton_accepts_only_vendored_single_architectures() {
-    for architecture in ["80", "86", "89", "90a", "100a", "121a"] {
+fn triton_accepts_every_valid_cuda_architecture() {
+    for architecture in [
+        "80",
+        "86",
+        "87",
+        "89",
+        "90a",
+        "100a",
+        "103a",
+        "110",
+        "120a",
+        "121a",
+        "120a;121a",
+    ] {
         let mut inputs = linux();
         inputs.features.cuda = true;
         inputs.features.triton_aot = true;
         inputs.environment.cuda_architectures = Some(architecture.to_owned());
         let plan = plan(&inputs, &MockProbe::default()).unwrap();
-        assert!(plan
-            .cmake_defines
-            .contains(&("VLLM_CPP_TRITON", "ON".to_owned())));
-        assert!(plan
-            .cmake_defines
-            .contains(&("VLLM_CPP_TRITON_REGEN", "OFF".to_owned())));
-    }
-
-    for invalid in ["87", "103a", "110", "120a", "120a;121a"] {
-        let mut inputs = linux();
-        inputs.features.cuda = true;
-        inputs.features.triton_aot = true;
-        inputs.environment.cuda_architectures = Some(invalid.to_owned());
-        assert!(error(&inputs, &MockProbe::default()).contains("vendored single"));
+        let mut expected = deterministic_defines("ON", "OFF", "OFF", "OFF", "ON", "OFF");
+        expected.push(("VLLM_CPP_CUDA_ARCHITECTURES", architecture.to_owned()));
+        assert_eq!(plan.cmake_defines, expected);
     }
 }
 
 #[test]
 fn rejects_cuda_sanitizers_and_unsupported_vulkan_targets() {
+    let mut sanitized = linux();
+    sanitized.environment.sanitizer = Some("address,undefined".to_owned());
+    let sanitized_plan = plan(&sanitized, &MockProbe::default()).unwrap();
+    assert_eq!(
+        sanitized_plan.cmake_defines,
+        deterministic_defines("OFF", "OFF", "OFF", "OFF", "OFF", "address,undefined")
+    );
+
     let mut inputs = linux();
     inputs.features.cuda = true;
     inputs.environment.cuda_architectures = Some("80".to_owned());
