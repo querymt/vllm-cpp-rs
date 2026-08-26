@@ -3,12 +3,14 @@
 //! # Entry points
 //!
 //! Resolve a Hub model with [`HuggingFaceModel`] (default `main`, or an explicit
-//! revision), then create an [`Engine`] with [`Engine::load`] or configure native
-//! model settings through [`EngineBuilder`]. [`SamplingParams`] owns sampling,
+//! revision), then create a text [`Engine`] with [`Engine::load`] or configure
+//! native model settings through [`EngineBuilder`]. Path-only
+//! [`TranscriptionEngine`] and [`EmbeddingEngine`] owners reserve task-specific
+//! method surfaces for future operations. [`SamplingParams`] owns sampling,
 //! stop-string, [`StructuredOutput`] settings, and an optional host-side logits
-//! processor for completion calls. The engine provides
-//! blocking completion, streaming, raw-JSON chat, and [`Engine::submit`] for a
-//! concurrent [`Request`]. Enable `serde` for `serde_json::Value` chat helpers.
+//! processor for completion calls. The text engine provides blocking completion,
+//! streaming, raw-JSON chat, and [`Engine::submit`] for a concurrent [`Request`].
+//! Enable `serde` for `serde_json::Value` chat helpers.
 //!
 //! # Ownership and callbacks
 //!
@@ -21,12 +23,15 @@
 //! [`Error::LogitsProcessorPanicked`].
 //!
 //! A [`Request`] retains its engine and asynchronous callback until native
-//! free/join completes. Requests are `Send` but intentionally not `Sync`, while
-//! engines are `Send + Sync`. Asynchronous callbacks run on a native delivery
-//! thread, must be `Send + 'static`, and surface panic through
+//! free/join completes. Requests are `Send` but intentionally not `Sync`. The text
+//! [`Engine`] is `Send + Sync`; transcription and embedding owners are
+//! conservatively neither and must remain on their creating thread. Asynchronous
+//! callbacks run on a native delivery thread, must be `Send + 'static`, and surface panic through
 //! [`Error::CallbackPanicked`]. ABI version 17 forbids waiting for or freeing a
 //! request from its callback thread; callback-thread drop delegates ownership to
-//! a cleanup reaper instead.
+//! a cleanup reaper instead. ABI 17 exposes no task-introspection API, so loading
+//! cannot prove or infer a checkpoint's task. Native task selection and future
+//! wrong-task diagnostics remain authoritative.
 //!
 //! # ABI, linking, and deployment
 //!
@@ -47,6 +52,7 @@
 //! Accelerator features are build/configuration surfaces with known runtime
 //! blockers, not complete accelerator runtime support.
 
+mod abi;
 mod callback;
 mod engine;
 mod error;
@@ -55,10 +61,12 @@ mod params;
 mod request;
 
 pub use callback::{StreamControl, StreamEvent, StreamOutcome};
-pub use engine::{Completion, Engine, EngineBuilder, FinishReason};
+pub use engine::{
+    Completion, EmbeddingEngine, Engine, EngineBuilder, FinishReason, TranscriptionEngine,
+};
 pub use error::{Error, HuggingFaceError};
 pub use hf::HuggingFaceModel;
-pub use params::{SamplingParams, SchedulerPolicy, StructuredOutput, Toggle};
+pub use params::{Device, SamplingParams, SchedulerPolicy, StructuredOutput, Toggle};
 pub use request::{Request, RequestOutcome};
 
 /// Returns the compile-time C ABI expected by this crate.
