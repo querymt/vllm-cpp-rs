@@ -7,8 +7,12 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_cpp_sys::{
-    vllm_completion, vllm_logits_processor, vllm_model_params, vllm_sampling_params, vllm_status,
-    vllm_token_callback,
+    vllm_completion, vllm_embedding_result, vllm_engine, vllm_logits_processor, vllm_model_params,
+    vllm_request, vllm_sampling_params, vllm_status, vllm_status_VLLM_ERR_INVALID_ARGUMENT,
+    vllm_status_VLLM_ERR_MODEL_LOAD, vllm_status_VLLM_ERR_RUNTIME, vllm_status_VLLM_ERR_UNKNOWN,
+    vllm_status_VLLM_OK, vllm_token_callback, vllm_transcription, vllm_transcription_params,
+    vllm_video_engine, vllm_video_model_params, vllm_video_mux_params, vllm_video_params,
+    vllm_video_result,
 };
 
 #[test]
@@ -47,7 +51,39 @@ fn generated_bindings_match_c_layout() {
         };
     }
 
+    macro_rules! expect_named_layout {
+        ($name:literal, $type:ty) => {
+            assert_eq!(
+                actual[$name],
+                (size_of::<$type>(), align_of::<$type>()),
+                "layout mismatch for {}",
+                $name
+            );
+        };
+    }
+    macro_rules! expect_value {
+        ($name:literal, $value:expr) => {
+            assert_eq!(
+                actual[$name].0, $value as usize,
+                "value mismatch for {}",
+                $name
+            );
+        };
+    }
+
     expect_layout!(vllm_status);
+    expect_value!("VLLM_OK", vllm_status_VLLM_OK);
+    expect_value!(
+        "VLLM_ERR_INVALID_ARGUMENT",
+        vllm_status_VLLM_ERR_INVALID_ARGUMENT
+    );
+    expect_value!("VLLM_ERR_MODEL_LOAD", vllm_status_VLLM_ERR_MODEL_LOAD);
+    expect_value!("VLLM_ERR_RUNTIME", vllm_status_VLLM_ERR_RUNTIME);
+    expect_value!("VLLM_ERR_UNKNOWN", vllm_status_VLLM_ERR_UNKNOWN);
+
+    expect_named_layout!("vllm_engine_ptr", *mut vllm_engine);
+    expect_named_layout!("vllm_request_ptr", *mut vllm_request);
+    expect_named_layout!("vllm_video_engine_ptr", *mut vllm_video_engine);
 
     expect_layout!(vllm_model_params);
     expect_offset!(vllm_model_params, model_path);
@@ -64,6 +100,9 @@ fn generated_bindings_match_c_layout() {
     expect_offset!(vllm_model_params, scheduling_policy);
     expect_offset!(vllm_model_params, kv_transfer_config);
     expect_offset!(vllm_model_params, enable_jump_forward);
+    expect_offset!(vllm_model_params, device);
+    expect_offset!(vllm_model_params, gpu_memory_utilization);
+    expect_offset!(vllm_model_params, kv_cache_memory_bytes);
 
     expect_layout!(vllm_sampling_params);
     expect_offset!(vllm_sampling_params, temperature);
@@ -94,6 +133,72 @@ fn generated_bindings_match_c_layout() {
     expect_offset!(vllm_completion, finish_reason);
     expect_offset!(vllm_completion, prompt_tokens);
     expect_offset!(vllm_completion, completion_tokens);
+
+    expect_layout!(vllm_transcription_params);
+    expect_offset!(vllm_transcription_params, audio_path);
+    expect_offset!(vllm_transcription_params, pcm);
+    expect_offset!(vllm_transcription_params, n_samples);
+    expect_offset!(vllm_transcription_params, sample_rate);
+
+    expect_layout!(vllm_transcription);
+    expect_offset!(vllm_transcription, text);
+    expect_offset!(vllm_transcription, token_ids);
+    expect_offset!(vllm_transcription, n_token_ids);
+    expect_offset!(vllm_transcription, has_text);
+
+    expect_layout!(vllm_embedding_result);
+    expect_offset!(vllm_embedding_result, values);
+    expect_offset!(vllm_embedding_result, n_embeddings);
+    expect_offset!(vllm_embedding_result, dim);
+    expect_offset!(vllm_embedding_result, prompt_tokens);
+
+    expect_layout!(vllm_video_model_params);
+    expect_offset!(vllm_video_model_params, dit_path);
+    expect_offset!(vllm_video_model_params, encoder_path);
+    expect_offset!(vllm_video_model_params, tokenizer_path);
+    expect_offset!(vllm_video_model_params, video_vae_path);
+    expect_offset!(vllm_video_model_params, video_vae_config_path);
+    expect_offset!(vllm_video_model_params, audio_vae_path);
+    expect_offset!(vllm_video_model_params, audio_vae_config_path);
+    expect_offset!(vllm_video_model_params, prompt_embeds_path);
+    expect_offset!(vllm_video_model_params, partition);
+    expect_offset!(vllm_video_model_params, device);
+    expect_offset!(vllm_video_model_params, dequant_bf16);
+    expect_offset!(vllm_video_model_params, fp4_resident);
+
+    expect_layout!(vllm_video_params);
+    expect_offset!(vllm_video_params, prompt);
+    expect_offset!(vllm_video_params, width);
+    expect_offset!(vllm_video_params, height);
+    expect_offset!(vllm_video_params, num_frames);
+    expect_offset!(vllm_video_params, steps);
+    expect_offset!(vllm_video_params, seed);
+    expect_offset!(vllm_video_params, has_seed);
+    expect_offset!(vllm_video_params, first_frame);
+    expect_offset!(vllm_video_params, last_frame);
+    expect_offset!(vllm_video_params, ref_image);
+    expect_offset!(vllm_video_params, ref_video);
+    expect_offset!(vllm_video_params, ref_audio);
+    expect_offset!(vllm_video_params, noise_aug);
+    expect_offset!(vllm_video_params, output_dir);
+
+    expect_layout!(vllm_video_result);
+    expect_offset!(vllm_video_result, frame_dir);
+    expect_offset!(vllm_video_result, audio_path);
+    expect_offset!(vllm_video_result, frame_count);
+    expect_offset!(vllm_video_result, width);
+    expect_offset!(vllm_video_result, height);
+    expect_offset!(vllm_video_result, fps);
+    expect_offset!(vllm_video_result, sample_rate);
+    expect_offset!(vllm_video_result, mux_argv);
+    expect_offset!(vllm_video_result, mux_argc);
+
+    expect_layout!(vllm_video_mux_params);
+    expect_offset!(vllm_video_mux_params, frames);
+    expect_offset!(vllm_video_mux_params, audio_path);
+    expect_offset!(vllm_video_mux_params, output_path);
+    expect_offset!(vllm_video_mux_params, fps);
+    expect_offset!(vllm_video_mux_params, crf);
 
     expect_layout!(vllm_token_callback);
     expect_layout!(vllm_logits_processor);

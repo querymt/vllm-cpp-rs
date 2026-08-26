@@ -24,7 +24,7 @@
 //! free/join completes. Requests are `Send` but intentionally not `Sync`, while
 //! engines are `Send + Sync`. Asynchronous callbacks run on a native delivery
 //! thread, must be `Send + 'static`, and surface panic through
-//! [`Error::CallbackPanicked`]. ABI version 10 forbids waiting for or freeing a
+//! [`Error::CallbackPanicked`]. ABI version 17 forbids waiting for or freeing a
 //! request from its callback thread; callback-thread drop delegates ownership to
 //! a cleanup reaper instead.
 //!
