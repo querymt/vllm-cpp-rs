@@ -4,8 +4,10 @@
 //!
 //! Resolve a Hub model with [`HuggingFaceModel`] (default `main`, or an explicit
 //! revision), then create a text [`Engine`] with [`Engine::load`] or configure
-//! native model settings through [`EngineBuilder`]. [`TranscriptionEngine`] and
-//! [`EmbeddingEngine`] provide blocking task-specific operations. A separate
+//! native model settings through [`EngineBuilder`]. [`TranscriptionEngineBuilder`]
+//! exposes only device selection, while [`EmbeddingEngineBuilder`] exposes the
+//! native capacity, prefix-cache, device, and memory controls applicable to
+//! embeddings. Their task-specific engines provide blocking operations. A separate
 //! [`VideoEngine`] loads MiniMax-H3 checkpoint sets and performs exclusive,
 //! blocking generation; [`compose_video_mux_argv`] composes owned ffmpeg argument
 //! boundaries without executing a process. [`SamplingParams`] owns sampling,
@@ -35,9 +37,9 @@
 //! Asynchronous callbacks run on a native delivery thread, must be `Send + 'static`, and surface panic through
 //! [`Error::CallbackPanicked`]. ABI version 17 forbids waiting for or freeing a
 //! request from its callback thread; callback-thread drop delegates ownership to
-//! a cleanup reaper instead. ABI 17 exposes no task-introspection API, so loading
-//! cannot prove or infer a checkpoint's task. Native task selection and future
-//! wrong-task diagnostics remain authoritative. Video model format, partition,
+//! a cleanup reaper instead. ABI 17 exposes no task-introspection API, so native
+//! selects the task at load time and a successful load does not prove compatibility
+//! with a Rust task owner. Wrong-task operations remain native errors. Video model format, partition,
 //! checkpoint capability, and reference-media checks are likewise native
 //! authority; Rust performs only structural validation.
 //!
@@ -89,10 +91,10 @@ mod request;
 
 pub use callback::{StreamControl, StreamEvent, StreamOutcome};
 pub use engine::{
-    compose_video_mux_argv, Completion, EmbeddingEngine, EmbeddingResult, Engine, EngineBuilder,
-    FinishReason, TokenCompletion, Transcription, TranscriptionEngine, TranscriptionInput,
-    VideoDevice, VideoEngine, VideoEngineBuilder, VideoGenerationParams, VideoMuxArgv,
-    VideoMuxParams, VideoPartition, VideoResult,
+    compose_video_mux_argv, Completion, EmbeddingEngine, EmbeddingEngineBuilder, EmbeddingResult,
+    Engine, EngineBuilder, FinishReason, TokenCompletion, Transcription, TranscriptionEngine,
+    TranscriptionEngineBuilder, TranscriptionInput, VideoDevice, VideoEngine, VideoEngineBuilder,
+    VideoGenerationParams, VideoMuxArgv, VideoMuxParams, VideoPartition, VideoResult,
 };
 pub use error::{Error, HuggingFaceError};
 pub use hf::HuggingFaceModel;
