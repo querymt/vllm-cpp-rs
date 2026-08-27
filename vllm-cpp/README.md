@@ -1,6 +1,6 @@
 # vllm-cpp
 
-Safe Rust API for the stable [vllm.cpp](https://github.com/mudler/vllm.cpp) C boundary. The crate owns native resources, checks ABI compatibility before model loading, and provides blocking completion/streaming/chat plus concurrent requests. Use `vllm-cpp-sys` directly only when an application needs the unsafe raw ABI.
+Safe Rust API for the stable [vllm.cpp](https://github.com/mudler/vllm.cpp) C boundary. The crate owns native resources, checks ABI compatibility before loading, and covers text completion/streaming/chat/requests, pre-tokenized completion, transcription, embeddings, video generation, and mux argument composition. Use `vllm-cpp-sys` only for the unsafe raw ABI.
 
 ## Quick use
 
@@ -41,15 +41,26 @@ In the repository checkout, `just setup-test-model` explicitly resolves `Qwen/Qw
 
 ## API and ownership
 
-- `EngineBuilder` configures and loads a model. `Engine` is `Clone + Send + Sync`; clones share one reference-counted native engine.
-- `SamplingParams` owns stop strings, structured constraints, and an optional `Send + Sync` custom logits processor. The processor receives generated token IDs and a mutable logits row each decode step; panics are contained and returned as `Error::LogitsProcessorPanicked`. Processor-backed generation must have a finite `max_tokens` bound because ABI v10 cannot abort from that callback. Processor state remains registered only through the blocking call or asynchronous request lifetime; stale native invocations after cleanup become no-ops.
-- Completion, chat, error, and stream text is copied into Rust-owned values before native storage is released or reused.
-- Blocking `complete`, `complete_stream`, `chat_json`, and `chat_stream_json` calls keep borrowed callbacks alive only for the call. Callback panics are caught before crossing C and resumed after the native call returns.
-- `Engine::submit` returns a `Request` before generation finishes. A request retains its engine and callback until native free/join completes, is `Send`, and is deliberately not `Sync`.
-- Asynchronous callbacks run on a native delivery thread and must be `Send + 'static`. `wait` reports callback panics as `Error::CallbackPanicked`; waiting or freeing from that same callback thread is prohibited by ABI v10, so callback-thread drop transfers cleanup to a prestarted reaper.
-- Dropping a live request cancels and joins it. `cancel` is idempotent, `wait` reports the request outcome, and `native_error` copies the request-owned diagnostic after completion into an owned Rust `String`; the native storage remains valid until the request is dropped or freed.
+| Surface | Owner and contract |
+|---|---|
+| Text | `EngineBuilder` loads `Engine`; `Engine` is `Clone + Send + Sync` and shares one `Arc`-retained native handle. Completion, streaming, chat, structured output, logits processors, and `complete_tokens` are blocking; `submit` returns a non-blocking `Request`. |
+| Tokens | `complete_tokens` borrows prompt IDs for the call and returns `TokenCompletion`. Output capacity limits reported IDs, not generation. `truncated` comes from native completion metadata; `include_completion = false` suppresses only the Rust metadata copy. |
+| Transcription | `TranscriptionEngine` is non-cloneable and neither `Send` nor `Sync`; `transcribe(&mut self, TranscriptionInput)` blocks, borrows a WAV path or PCM slice, and returns Rust-owned optional text and token IDs. |
+| Embeddings | `EmbeddingEngine` has the same conservative thread-local/exclusive contract. `embed(&mut self, ...)` blocks and returns a Rust-owned row-major `EmbeddingResult` preserving input order. |
+| Video | `VideoEngineBuilder` loads a separate checkpoint set. Non-cloneable `VideoEngine` is neither `Send` nor `Sync`; `generate(&mut self, ...)` is blocking and exclusive and returns Rust-owned paths, dimensions, rates, counts, and mux argv. |
+| Mux | `compose_video_mux_argv(&VideoMuxParams)` returns owned `VideoMuxArgv` argument boundaries. It performs no filesystem I/O and never locates or executes ffmpeg. |
 
-`SchedulerPolicy::Priority` selects the native priority queue. Raw and serde chat request JSON can carry a `priority` field that the native OpenAI-compatible path parses and submits. Direct completion, completion streaming, and `Request` submissions currently default to priority zero and tie by arrival; caller-selected priorities for those direct APIs require a future C ABI/API change.
+`EngineBuilder` obtains native defaults first and overlays only explicit Rust settings. Unset values preserve the helper defaults, including `block_size=32`, `max_num_seqs=32`, and `gpu_memory_utilization=0.92`. `Device` uses `Auto=0`, `Cpu=1`, and `Cuda=2`; explicit CUDA never falls back. KV-memory precedence is `num_blocks > kv_cache_memory_bytes > gpu_memory_utilization` and its native profile/fallback path. Video uses independent `VideoDevice` numbering, `Cpu=0` and `Cuda=1`, with no automatic mode.
+
+All native completion, chat, transcription, embedding, video, stream, argv, and diagnostic data is copied into Rust-owned values before native storage is released or reused. Blocking calls borrow their input storage only until return. Blocking callback panics are contained before C and resumed afterward. Custom logits processors are `Send + Sync`, may run on native worker threads, and report contained panic through `Error::LogitsProcessorPanicked`.
+
+`Engine::submit` returns a `Request` that retains its engine, callback, and optional logits processor until native free/join completes. A request is `Send` but not `Sync`; dropping a live request cancels and joins it. Asynchronous callbacks are `Send + 'static` and run on a native delivery thread. Callback-thread wait/free is rejected or delegated to the cleanup reaper under the stable ABI lifecycle contract.
+
+ABI 17 exposes no task query. Loading `Engine`, `TranscriptionEngine`, or `EmbeddingEngine` does not inspect or infer the checkpoint task; native wrong-task `Error::InvalidArgument` diagnostics remain authoritative. Video model format, partition, task, media, and capability checks are also native authority.
+
+Video generation creates or truncates frame/audio artifacts, may leave stale files or partial output after failure, and has no cancellation, timeout, quota, rollback, or sandbox. Paths are trusted as supplied; Rust does not canonicalize, confine, reject symlinks, or clean outputs. On Unix, paths and mux arguments preserve raw bytes through `OsString`; non-Unix native conversion requires valid UTF-8. Mux arguments remain separate process arguments and must not be shell-joined. This crate does not execute ffmpeg, a server, or any other process.
+
+`SchedulerPolicy::Priority` selects the native queue. Raw and serde chat JSON may carry `priority`; direct completion, streaming, and `Request` submission currently use priority zero and tie by arrival.
 
 ## Features and linking
 
@@ -72,13 +83,13 @@ Hugging Face resolution is not a Cargo feature: synchronous `hf-hub` support is 
 
 ## ABI and deployment
 
-This crate is tied to the exact same `vllm-cpp-sys` crate version and the pinned vllm.cpp commit `34aedfbe8ed9779697905541a62e2160ccfd9c05`. Model loading requires exact C ABI version 10 before any versioned struct crosses FFI. `version()` copies the linked library's diagnostic native version string, while `abi_version()` remains the compatibility authority. A system library must implement the same ABI; the consumer build checks for its header, while maintainer conformance tests check layout and symbols.
+This crate uses the exact matching `vllm-cpp-sys =0.0.2`, whose bundled source is independently pinned to vllm.cpp tag `v0.0.2`, commit `7020de93652ca920424a10ac5255b34810dd2f24`. The checked-in bindings cover all 35 stable C functions at ABI 17. Loading checks exact runtime ABI equality before any versioned struct crosses FFI. `version()` is diagnostic; `abi_version()` is the compatibility authority. A system library must implement ABI 17 with matching layouts and signatures; ABI-10 libraries are incompatible.
 
 Static bundled builds include the native archive in the application link. Dynamic bundled or system builds do not deploy `libvllm.so`/`libvllm.dylib`: install it and its backend/toolkit dependencies in a loader-visible location using `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, rpath supplied by the application, or the system loader configuration. System mode uses `VLLM_CPP_ROOT`; `VLLM_CPP_LIB_DIR` can choose a nonstandard library directory. System static linking also requires the matching `libblake3_vendored.a` through `VLLM_CPP_BLAKE3_LIB_DIR` or the selected vllm library directory.
 
 ## Support boundary
 
-The supported runtime tier is native Linux x86_64 CPU, covering bundled/system and static/dynamic link modes. Linux ARM64 and Apple ARM64 CPU have manual hosted jobs configured for model-free build/test coverage. CUDA, external CUTLASS, Triton AOT, Vulkan, Metal, and MLX are experimental build/configuration surfaces. The hosted Metal job checks compilation/linking only; Vulkan software-device gates check backend/ops, not attention or model inference; MLX remains external and has no release-lane model/runtime evidence. Known native blockers include CUDA teardown failure, CUDA bf16 numerical tolerance failure, CUTLASS concurrent-output differences, incomplete Vulkan attention/model runtime, and MLX's numerically distinct provider behavior. CPU remains the only supported runtime family.
+The supported runtime tier is native Linux x86_64 CPU, covering bundled/system and static/dynamic link modes. Mandatory candidate evidence is model-free and includes native fixtures, sanitizers, exact link/export checks, packages, and downstream consumers. Prepared-Qwen inference/sanitizers, TSan, successful Rust MiniMax-H3 generation, Miri, Linux ARM64, Apple ARM64, Vulkan, CUDA/CUTLASS/Triton, Metal/MLX, and accelerator runtime are optional or deferred unless rerun against the exact candidate. Accelerator features remain experimental build/configuration surfaces; CPU is the only supported runtime family.
 
 See the repository [changelog](https://github.com/querymt/vllm-cpp-rs/blob/main/CHANGELOG.md), [release process](https://github.com/querymt/vllm-cpp-rs/blob/main/RELEASING.md), and [root support details](https://github.com/querymt/vllm-cpp-rs#support) for the current release boundary.
 
