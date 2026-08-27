@@ -106,8 +106,37 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
+      - name: Install Just
+        uses: extractions/setup-just@v3.1.0
+        with:
+          just-version: "1.40.0"
       - name: Test model-free workspace targets
-        run: env -u VLLM_CPP_TEST_MODEL cargo test --locked --workspace --all-targets --features vllm-cpp/serde
+        run: just test
+
+  sanitizers:
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4.4.0
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo state
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - name: Install native dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build python3
+      - name: Install Just
+        uses: extractions/setup-just@v3.1.0
+        with:
+          just-version: "1.40.0"
+      - name: Test model-free ownership under sanitizers
+        run: just sanitizers-model-free
 
   native:
     needs: [docs, test]
@@ -126,7 +155,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install native dependencies
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends binutils build-essential clang cmake ninja-build
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends binutils build-essential clang cmake ninja-build python3
       - name: Install Just
         uses: extractions/setup-just@v3.1.0
         with:
@@ -137,9 +166,11 @@ jobs:
         run: just sys
       - name: Test Linux CPU link modes
         run: just link-modes
+      - name: Test native CPU C API fixtures
+        run: just native-capi
 
   package:
-    needs: native
+    needs: [native, sanitizers]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
