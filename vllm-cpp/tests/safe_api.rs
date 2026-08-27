@@ -1,7 +1,8 @@
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 use vllm_cpp::{
-    Device, EmbeddingEngine, Engine, EngineBuilder, Error, HuggingFaceError, HuggingFaceModel,
-    Request, SchedulerPolicy, Toggle, TranscriptionEngine,
+    Device, EmbeddingEngine, EmbeddingResult, Engine, EngineBuilder, Error, HuggingFaceError,
+    HuggingFaceModel, Request, SchedulerPolicy, Toggle, TokenCompletion, Transcription,
+    TranscriptionEngine, TranscriptionInput,
 };
 
 assert_impl_all!(Device: Clone, Copy, std::fmt::Debug, Default, Eq, PartialEq, Send, Sync);
@@ -11,12 +12,43 @@ assert_impl_all!(HuggingFaceError: Clone, std::fmt::Debug, Eq, PartialEq);
 assert_impl_all!(HuggingFaceModel: Clone, std::fmt::Debug);
 assert_impl_all!(Request: Send);
 assert_impl_all!(vllm_cpp::SamplingParams: Clone, Send, Sync);
+assert_impl_all!(TokenCompletion: Clone, std::fmt::Debug, Eq, PartialEq, Send, Sync);
+assert_impl_all!(Transcription: Clone, std::fmt::Debug, Eq, PartialEq, Send, Sync);
+assert_impl_all!(EmbeddingResult: Clone, std::fmt::Debug, PartialEq, Send, Sync);
+assert_impl_all!(TranscriptionInput<'static>: Clone, Copy, std::fmt::Debug, Send, Sync);
 assert_not_impl_any!(Request: Sync);
 assert_not_impl_any!(TranscriptionEngine: Send, Sync);
 assert_not_impl_any!(EmbeddingEngine: Send, Sync);
 
 fn missing_model() -> &'static str {
     "/nonexistent/vllm-cpp-rs-safe-api-model"
+}
+
+#[test]
+fn constructs_both_borrowed_transcription_inputs() {
+    let path = std::path::Path::new("audio.wav");
+    let samples = [0.0_f32, 0.25];
+    let inputs = [
+        TranscriptionInput::WavFile(path),
+        TranscriptionInput::Pcm {
+            samples: &samples,
+            sample_rate: 16_000,
+        },
+    ];
+    assert!(matches!(inputs[0], TranscriptionInput::WavFile(_)));
+    assert!(matches!(inputs[1], TranscriptionInput::Pcm { .. }));
+}
+
+#[test]
+fn invalid_native_output_display_is_stable() {
+    let error = Error::InvalidNativeOutput {
+        field: "embedding dimension",
+        message: "dimension is zero",
+    };
+    assert_eq!(
+        error.to_string(),
+        "invalid native output for embedding dimension: dimension is zero"
+    );
 }
 
 #[test]

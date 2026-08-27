@@ -4,19 +4,21 @@
 //!
 //! Resolve a Hub model with [`HuggingFaceModel`] (default `main`, or an explicit
 //! revision), then create a text [`Engine`] with [`Engine::load`] or configure
-//! native model settings through [`EngineBuilder`]. Path-only
-//! [`TranscriptionEngine`] and [`EmbeddingEngine`] owners reserve task-specific
-//! method surfaces for future operations. [`SamplingParams`] owns sampling,
-//! stop-string, [`StructuredOutput`] settings, and an optional host-side logits
-//! processor for completion calls. The text engine provides blocking completion,
-//! streaming, raw-JSON chat, and [`Engine::submit`] for a concurrent [`Request`].
-//! Enable `serde` for `serde_json::Value` chat helpers.
+//! native model settings through [`EngineBuilder`]. [`TranscriptionEngine`] and
+//! [`EmbeddingEngine`] provide blocking task-specific operations. [`SamplingParams`]
+//! owns sampling, stop-string, [`StructuredOutput`] settings, and an optional
+//! host-side logits processor for completion calls. The text engine provides
+//! blocking text and pre-tokenized completion, streaming, raw-JSON chat, and
+//! [`Engine::submit`] for a concurrent [`Request`]. Enable `serde` for
+//! `serde_json::Value` chat helpers.
 //!
 //! # Ownership and callbacks
 //!
 //! [`Engine`] is a cloneable RAII owner; clones share one reference-counted
-//! native engine. Rust copies completion, stream, chat, and error text before
-//! native storage is freed or reused. Blocking callbacks may borrow caller data.
+//! native engine. Rust copies completion, transcription, embedding, stream,
+//! chat, and error data before native storage is freed or reused. Pre-tokenized
+//! prompts, audio, paths, and embedding strings are borrowed only for their
+//! blocking calls. Blocking callbacks may borrow caller data.
 //! Their panics are caught before the C boundary and resumed after the native
 //! call returns. Custom logits processors are `Send + Sync`, may run concurrently
 //! on native worker threads, and report contained panic through
@@ -25,8 +27,9 @@
 //! A [`Request`] retains its engine and asynchronous callback until native
 //! free/join completes. Requests are `Send` but intentionally not `Sync`. The text
 //! [`Engine`] is `Send + Sync`; transcription and embedding owners are
-//! conservatively neither and must remain on their creating thread. Asynchronous
-//! callbacks run on a native delivery thread, must be `Send + 'static`, and surface panic through
+//! conservatively neither, must remain on their creating thread, and require
+//! exclusive access for operations. Native embedding execution is serialized.
+//! Asynchronous callbacks run on a native delivery thread, must be `Send + 'static`, and surface panic through
 //! [`Error::CallbackPanicked`]. ABI version 17 forbids waiting for or freeing a
 //! request from its callback thread; callback-thread drop delegates ownership to
 //! a cleanup reaper instead. ABI 17 exposes no task-introspection API, so loading
@@ -62,7 +65,8 @@ mod request;
 
 pub use callback::{StreamControl, StreamEvent, StreamOutcome};
 pub use engine::{
-    Completion, EmbeddingEngine, Engine, EngineBuilder, FinishReason, TranscriptionEngine,
+    Completion, EmbeddingEngine, EmbeddingResult, Engine, EngineBuilder, FinishReason,
+    TokenCompletion, Transcription, TranscriptionEngine, TranscriptionInput,
 };
 pub use error::{Error, HuggingFaceError};
 pub use hf::HuggingFaceModel;

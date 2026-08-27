@@ -60,6 +60,11 @@ pub enum Error {
     PathEncoding,
     /// Native code returned bytes that are not valid UTF-8.
     InvalidUtf8 { field: &'static str },
+    /// Native code returned malformed count, pointer, shape, or overflow metadata.
+    InvalidNativeOutput {
+        field: &'static str,
+        message: &'static str,
+    },
     /// An asynchronous output callback panicked.
     CallbackPanicked,
     /// A custom logits processor panicked.
@@ -94,6 +99,9 @@ impl fmt::Display for Error {
             Self::InteriorNul { field } => write!(f, "{field} contains an interior NUL byte"),
             Self::PathEncoding => write!(f, "path cannot be represented by the native API"),
             Self::InvalidUtf8 { field } => write!(f, "native {field} is not valid UTF-8"),
+            Self::InvalidNativeOutput { field, message } => {
+                write!(f, "invalid native output for {field}: {message}")
+            }
             Self::CallbackPanicked => write!(f, "asynchronous request callback panicked"),
             Self::LogitsProcessorPanicked => write!(f, "custom logits processor panicked"),
             Self::RequestCallbackThread { operation } => {
