@@ -4,8 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use vllm_cpp::{
-    Engine, Error, FinishReason, Request, RequestOutcome, SamplingParams, StreamControl,
-    StructuredOutput,
+    EmbeddingEngine, Engine, Error, FinishReason, Request, RequestOutcome, SamplingParams,
+    StreamControl, StructuredOutput, TranscriptionEngine, TranscriptionInput,
 };
 
 fn model_path() -> Option<PathBuf> {
@@ -53,6 +53,189 @@ fn wait_until_done(request: &Request) {
         );
         thread::sleep(Duration::from_millis(1));
     }
+}
+
+fn native_fixture(relative: &str) -> Option<PathBuf> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../vllm-cpp-sys/vllm.cpp/tests/vllm/models/fixtures")
+        .join(relative);
+    if path.exists() {
+        Some(path)
+    } else {
+        eprintln!(
+            "skipping native fixture test; fixture is absent: {}",
+            path.display()
+        );
+        None
+    }
+}
+
+fn read_pcm16_mono_wav(path: &Path) -> Vec<f32> {
+    let bytes = std::fs::read(path).expect("read fixture WAV");
+    assert_eq!(&bytes[0..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WAVE");
+    let mut offset = 12;
+    while offset + 8 <= bytes.len() {
+        let name = &bytes[offset..offset + 4];
+        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let start = offset + 8;
+        if name == b"data" {
+            return bytes[start..start + size]
+                .chunks_exact(2)
+                .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0)
+                .collect();
+        }
+        offset = start + size + (size % 2);
+    }
+    panic!("fixture WAV has no data chunk");
+}
+
+#[test]
+fn pretokenized_completion_matches_qwen_hello_and_reports_truncation() {
+    with_engine(|engine, _| {
+        let params = SamplingParams::greedy().max_tokens(4);
+        let full = engine
+            .complete_tokens(&[9707], &params, 8, true)
+            .expect("full pre-tokenized completion");
+        assert_eq!(full.token_ids.len(), 4);
+        assert!(!full.truncated);
+        let details = full.completion.as_ref().expect("completion details");
+        assert_eq!(details.prompt_tokens, 1);
+        assert_eq!(details.completion_tokens, 4);
+        assert_eq!(
+            details,
+            &engine
+                .complete("Hello", &params)
+                .expect("string-prompt parity completion")
+        );
+
+        let small = engine
+            .complete_tokens(&[9707], &params, 2, false)
+            .expect("truncated pre-tokenized completion");
+        assert_eq!(small.token_ids, full.token_ids[..2]);
+        assert!(small.completion.is_none());
+        assert!(small.truncated);
+
+        let zero = engine
+            .complete_tokens(&[9707], &params, 0, false)
+            .expect("zero-capacity pre-tokenized completion");
+        assert!(zero.token_ids.is_empty());
+        assert!(zero.completion.is_none());
+        assert!(zero.truncated);
+    });
+}
+
+#[test]
+fn pretokenized_logits_processor_controls_tokens_and_panic_leaves_engine_reusable() {
+    with_engine(|engine, _| {
+        let params = SamplingParams::greedy()
+            .max_tokens(3)
+            .logits_processor(|_, logits| {
+                logits.fill(f32::NEG_INFINITY);
+                logits[10] = f32::INFINITY;
+            });
+        let forced = engine
+            .complete_tokens(&[9707], &params, 3, false)
+            .expect("forced token completion");
+        assert_eq!(forced.token_ids, [10, 10, 10]);
+
+        let panicking = SamplingParams::greedy()
+            .max_tokens(1)
+            .logits_processor(|_, _| panic!("intentional token processor panic"));
+        assert_eq!(
+            engine
+                .complete_tokens(&[9707], &panicking, 1, true)
+                .expect_err("processor panic"),
+            Error::LogitsProcessorPanicked
+        );
+        engine
+            .complete_tokens(&[9707], &SamplingParams::greedy().max_tokens(1), 1, false)
+            .expect("engine remains reusable");
+    });
+}
+
+#[test]
+fn committed_transcription_fixture_supports_path_pcm_and_wrong_task() {
+    let Some(root) = native_fixture("parakeet_e2e") else {
+        return;
+    };
+    let model = root.join("ctc");
+    let wav = root.join("audio.wav");
+    let mut engine = TranscriptionEngine::load(&model).expect("load CTC fixture");
+    let from_path = engine
+        .transcribe(TranscriptionInput::WavFile(&wav))
+        .expect("transcribe fixture path");
+    assert_eq!(from_path.token_ids, [3, 4, 3]);
+    assert_eq!(from_path.text.as_deref(), Some("atheat"));
+
+    let samples = read_pcm16_mono_wav(&wav);
+    let from_pcm = engine
+        .transcribe(TranscriptionInput::Pcm {
+            samples: &samples,
+            sample_rate: 16_000,
+        })
+        .expect("transcribe fixture PCM");
+    assert_eq!(from_pcm, from_path);
+
+    let text = Engine::load(&model).expect("task-neutral load of CTC fixture");
+    assert!(matches!(
+        text.complete_tokens(&[0], &SamplingParams::greedy().max_tokens(1), 1, false),
+        Err(Error::InvalidArgument { .. })
+    ));
+
+    if let Some(embedding_model) = native_fixture("llama_embed_e2e") {
+        let mut wrong =
+            TranscriptionEngine::load(&embedding_model).expect("task-neutral embedding load");
+        assert!(matches!(
+            wrong.transcribe(TranscriptionInput::WavFile(&wav)),
+            Err(Error::InvalidArgument { .. })
+        ));
+    }
+}
+
+#[test]
+fn committed_embedding_fixture_preserves_shape_order_ownership_and_wrong_task() {
+    let Some(model) = native_fixture("llama_embed_e2e") else {
+        return;
+    };
+    let mut engine = EmbeddingEngine::load(&model).expect("load embedding fixture");
+    let result = engine
+        .embed(["the quick brown fox", "the lazy dog"])
+        .expect("embed fixture inputs");
+    assert_eq!(result.n_embeddings(), 2);
+    assert_eq!(result.dimension(), 64);
+    assert!(result.prompt_tokens() > 0);
+    assert_ne!(result.row(0), result.row(1));
+    for row in result.rows() {
+        let l2 = row
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        assert!((l2 - 1.0).abs() < 1e-5);
+    }
+    drop(engine);
+    assert_eq!(result.values().len(), 128);
+
+    let text = Engine::load(&model).expect("task-neutral embedding load");
+    assert!(matches!(
+        text.complete_tokens(&[0], &SamplingParams::greedy().max_tokens(1), 1, false),
+        Err(Error::InvalidArgument { .. })
+    ));
+
+    if let Some(transcription_root) = native_fixture("parakeet_e2e") {
+        let mut wrong = EmbeddingEngine::load(transcription_root.join("ctc"))
+            .expect("task-neutral transcription load");
+        assert!(matches!(
+            wrong.embed(["hello"]),
+            Err(Error::InvalidArgument { .. })
+        ));
+    }
+
+    let mut engine = EmbeddingEngine::load(&model).expect("reload embedding fixture");
+    engine
+        .embed(["the fox"])
+        .expect("embedding owner remains usable");
 }
 
 #[test]

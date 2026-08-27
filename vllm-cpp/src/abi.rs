@@ -26,6 +26,12 @@ impl Compatibility {
         unsafe { ffi::vllm_sampling_params_default() }
     }
 
+    pub(crate) fn transcription_params_default(&self) -> ffi::vllm_transcription_params {
+        // SAFETY: the engine retained this token after exact ABI equality was
+        // established, so this versioned struct may be returned by value.
+        unsafe { ffi::vllm_transcription_params_default() }
+    }
+
     fn from_actual(actual: i32) -> Result<Self, Error> {
         let expected = ffi::VLLM_ABI_VERSION as i32;
         if actual != expected {
@@ -52,6 +58,14 @@ impl Compatibility {
         &self,
         default: impl FnOnce() -> ffi::vllm_sampling_params,
     ) -> ffi::vllm_sampling_params {
+        default()
+    }
+
+    #[cfg(test)]
+    fn transcription_params_default_with(
+        &self,
+        default: impl FnOnce() -> ffi::vllm_transcription_params,
+    ) -> ffi::vllm_transcription_params {
         default()
     }
 }
@@ -82,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_precedes_both_by_value_defaults() {
+    fn compatibility_precedes_all_by_value_defaults() {
         let calls = RefCell::new(Vec::new());
         let compatibility = Compatibility::check_with(|| {
             calls.borrow_mut().push("abi");
@@ -100,10 +114,20 @@ mod tests {
             // SAFETY: every field in this generated C struct permits zero.
             unsafe { std::mem::zeroed() }
         });
+        compatibility.transcription_params_default_with(|| {
+            calls.borrow_mut().push("transcription_default");
+            // SAFETY: every field in this generated C struct permits zero.
+            unsafe { std::mem::zeroed() }
+        });
 
         assert_eq!(
             *calls.borrow(),
-            ["abi", "model_default", "sampling_default"]
+            [
+                "abi",
+                "model_default",
+                "sampling_default",
+                "transcription_default"
+            ]
         );
     }
 }
