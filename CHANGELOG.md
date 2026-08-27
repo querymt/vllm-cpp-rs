@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## [0.0.2] - 2026-08-27
+
+### Changed
+
+- Pinned bundled native vllm.cpp to tag `v0.0.2`, commit `7020de93652ca920424a10ac5255b34810dd2f24`, moving the stable C contract from ABI 10 with 19 functions to ABI 17 with 35 functions; system libraries must match the new ABI, layouts, signatures, and exports.
+- Model construction now obtains native defaults and overlays only explicit Rust settings, preserving helper defaults including `block_size=32`, `max_num_seqs=32`, and `gpu_memory_utilization=0.92`.
+- Hardened deterministic backend configuration, binding/export/package checks, package curation, and multi-architecture Triton packaging: all six vendored AOT trees are embedded, exact-SM dispatched, and paired with portable fallback on other accepted targets.
+- Raised the safe crate unpacked package limit to 512 KiB while retaining its 40-file and 128-KiB compressed limits; sys limits remain 1,400 files, 40 MiB unpacked, and 6 MiB compressed.
+
+### Added
+
+- `Device::{Auto, Cpu, Cuda}` selection and KV-memory controls with native precedence `num_blocks > kv_cache_memory_bytes > gpu_memory_utilization` and profile/fallback sizing.
+- Pre-tokenized `Engine::complete_tokens` with owned token output, optional copied completion metadata, and explicit truncation reporting.
+- Thread-local, exclusive `TranscriptionEngine` and `EmbeddingEngine` owners with borrowed inputs and Rust-owned transcription and row-major embedding results.
+- Separate `VideoEngine` checkpoint-set ownership, blocking generation parameters/results, and standalone `VideoMuxParams`/`VideoMuxArgv` composition that never executes ffmpeg.
+- Model-free acceptance gates for docs, tests, ABI/layout/signature/exports, native fixtures, sanitizers, link modes, packages, downstream consumers, publish dry-run, and exact MSRV.
+
+### Compatibility
+
+- Both Rust crates are lockstep version `0.0.2`; `vllm-cpp` depends on exactly `vllm-cpp-sys =0.0.2`.
+- ABI-10 system libraries are incompatible. ABI 17 has no task query, so task-specific owners cannot introspect a checkpoint at load time and native wrong-task `InvalidArgument` errors remain authoritative.
+
+### Known limitations
+
+- Native Linux x86_64 CPU is the supported runtime family. The native `vllm_server_main` entry point remains raw-only; the safe crate exposes no tokenizer, task query, raw handle, HTTP-server wrapper, ffmpeg execution, or general process execution.
+- Video generation writes filesystem artifacts and may leave partial output. No successful Rust MiniMax-H3 generation fixture is claimed for this candidate.
+- Exact-candidate prepared-Qwen inference/sanitizers, native-only TSan, Miri, Linux ARM64, Apple ARM64, Vulkan, CUDA/CUTLASS/Triton, Metal/MLX, and accelerator runtime lanes were not run.
+
 ## [0.0.1] - 2026-08-22
 
 ### Added
