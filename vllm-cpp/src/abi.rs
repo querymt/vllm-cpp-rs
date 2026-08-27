@@ -32,6 +32,24 @@ impl Compatibility {
         unsafe { ffi::vllm_transcription_params_default() }
     }
 
+    pub(crate) fn video_model_params_default(&self) -> ffi::vllm_video_model_params {
+        // SAFETY: possession of this token proves exact ABI equality before
+        // this versioned struct is returned by value.
+        unsafe { ffi::vllm_video_model_params_default() }
+    }
+
+    pub(crate) fn video_params_default(&self) -> ffi::vllm_video_params {
+        // SAFETY: possession of this token proves exact ABI equality before
+        // this versioned struct is returned by value.
+        unsafe { ffi::vllm_video_params_default() }
+    }
+
+    pub(crate) fn video_mux_params_default(&self) -> ffi::vllm_video_mux_params {
+        // SAFETY: possession of this token proves exact ABI equality before
+        // this versioned struct is returned by value.
+        unsafe { ffi::vllm_video_mux_params_default() }
+    }
+
     fn from_actual(actual: i32) -> Result<Self, Error> {
         let expected = ffi::VLLM_ABI_VERSION as i32;
         if actual != expected {
@@ -66,6 +84,30 @@ impl Compatibility {
         &self,
         default: impl FnOnce() -> ffi::vllm_transcription_params,
     ) -> ffi::vllm_transcription_params {
+        default()
+    }
+
+    #[cfg(test)]
+    fn video_model_params_default_with(
+        &self,
+        default: impl FnOnce() -> ffi::vllm_video_model_params,
+    ) -> ffi::vllm_video_model_params {
+        default()
+    }
+
+    #[cfg(test)]
+    fn video_params_default_with(
+        &self,
+        default: impl FnOnce() -> ffi::vllm_video_params,
+    ) -> ffi::vllm_video_params {
+        default()
+    }
+
+    #[cfg(test)]
+    fn video_mux_params_default_with(
+        &self,
+        default: impl FnOnce() -> ffi::vllm_video_mux_params,
+    ) -> ffi::vllm_video_mux_params {
         default()
     }
 }
@@ -119,6 +161,21 @@ mod tests {
             // SAFETY: every field in this generated C struct permits zero.
             unsafe { std::mem::zeroed() }
         });
+        compatibility.video_model_params_default_with(|| {
+            calls.borrow_mut().push("video_model_default");
+            // SAFETY: every field in this generated C struct permits zero.
+            unsafe { std::mem::zeroed() }
+        });
+        compatibility.video_params_default_with(|| {
+            calls.borrow_mut().push("video_default");
+            // SAFETY: every field in this generated C struct permits zero.
+            unsafe { std::mem::zeroed() }
+        });
+        compatibility.video_mux_params_default_with(|| {
+            calls.borrow_mut().push("video_mux_default");
+            // SAFETY: every field in this generated C struct permits zero.
+            unsafe { std::mem::zeroed() }
+        });
 
         assert_eq!(
             *calls.borrow(),
@@ -126,7 +183,10 @@ mod tests {
                 "abi",
                 "model_default",
                 "sampling_default",
-                "transcription_default"
+                "transcription_default",
+                "video_model_default",
+                "video_default",
+                "video_mux_default"
             ]
         );
     }

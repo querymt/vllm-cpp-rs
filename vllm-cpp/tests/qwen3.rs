@@ -1,11 +1,13 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Barrier, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use vllm_cpp::{
-    EmbeddingEngine, Engine, Error, FinishReason, Request, RequestOutcome, SamplingParams,
-    StreamControl, StructuredOutput, TranscriptionEngine, TranscriptionInput,
+    compose_video_mux_argv, EmbeddingEngine, Engine, Error, FinishReason, Request, RequestOutcome,
+    SamplingParams, StreamControl, StructuredOutput, TranscriptionEngine, TranscriptionInput,
+    VideoEngine, VideoMuxParams,
 };
 
 fn model_path() -> Option<PathBuf> {
@@ -236,6 +238,61 @@ fn committed_embedding_fixture_preserves_shape_order_ownership_and_wrong_task() 
     engine
         .embed(["the fox"])
         .expect("embedding owner remains usable");
+}
+
+#[test]
+fn committed_video_mux_goldens_preserve_exact_argument_boundaries() {
+    let Some(root) = native_fixture("minimax_h3_video_fold") else {
+        return;
+    };
+
+    let audio = compose_video_mux_argv(
+        &VideoMuxParams::new(root.join("frame_%06d.ppm"), root.join("video.mp4"))
+            .audio_path(root.join("audio.wav")),
+    )
+    .expect("compose committed audio mux golden");
+    let golden =
+        std::fs::read_to_string(root.join("golden_mux_argv.txt")).expect("read audio mux golden");
+    let expected = golden
+        .split_ascii_whitespace()
+        .map(|argument| {
+            argument.strip_prefix("W/").map_or_else(
+                || OsString::from(argument),
+                |relative| root.join(relative).into_os_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(audio.args(), expected);
+
+    let silent = compose_video_mux_argv(&VideoMuxParams::new("frames_%06d.ppm", "silent.mp4"))
+        .expect("compose committed silent mux golden");
+    let golden = std::fs::read_to_string(root.join("golden_mux_argv_silent.txt"))
+        .expect("read silent mux golden");
+    let expected = golden
+        .split_ascii_whitespace()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+    assert_eq!(silent.args(), expected);
+}
+
+#[test]
+fn committed_parakeet_directory_is_rejected_as_video_dit() {
+    let Some(root) = native_fixture("parakeet_e2e") else {
+        return;
+    };
+    let model = root.join("ctc");
+    let error = VideoEngine::builder(&model)
+        .video_vae_path(&model)
+        .audio_vae_path(&model)
+        .load()
+        .err()
+        .expect("Parakeet must not load as a video DiT");
+    match error {
+        Error::ModelLoad { message } => {
+            assert!(message.contains("vllm_engine_load"), "{message}");
+        }
+        other => panic!("unexpected wrong-direction error: {other:?}"),
+    }
 }
 
 #[test]
