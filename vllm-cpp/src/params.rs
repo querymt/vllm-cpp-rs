@@ -434,9 +434,19 @@ pub(crate) struct LogitsProcessorRegistration {
 
 impl LogitsProcessorRegistration {
     fn new(callback: Arc<DynLogitsProcessor>) -> Self {
-        let id = NEXT_PROCESSOR_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-            .unwrap_or_else(|_| std::process::abort());
+        let mut id = NEXT_PROCESSOR_ID.load(Ordering::Relaxed);
+        loop {
+            let next = id.checked_add(1).unwrap_or_else(|| std::process::abort());
+            match NEXT_PROCESSOR_ID.compare_exchange_weak(
+                id,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => id = current,
+            }
+        }
         let state = Arc::new(LogitsProcessorState::new(callback));
         lock_unpoisoned(logits_processor_registry()).insert(id, Arc::downgrade(&state));
         Self { id, state }
@@ -684,6 +694,20 @@ mod tests {
         }
         assert_eq!(logits, [1.0, 9.0, 3.0]);
         assert_eq!(marshaled.logits_processor_error(), None);
+    }
+
+    #[test]
+    fn processor_ids_are_unique_across_threads() {
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    super::LogitsProcessorRegistration::new(Arc::new(|_, _| {})).id
+                })
+            })
+            .collect();
+        let mut ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        ids.sort_unstable();
+        assert!(ids[0] > 0 && ids.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]
