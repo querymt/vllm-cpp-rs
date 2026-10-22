@@ -1,6 +1,6 @@
 # examples
 
-five intentionally text-focused examples exercise the safe `vllm-cpp` api: four use fixed prompts and settings, and `chat` is an interactive command-line application. one additional maintainer utility prepares the optional pinned text fixture:
+five text examples and one experimental MiniMax-H3 video example exercise the safe `vllm-cpp` api: four text examples use fixed prompts and settings, and `chat` is an interactive command-line application. `video_generate` is runnable but has not been validated end-to-end. one additional maintainer utility prepares the optional pinned text fixture:
 
 | example | behavior |
 |---|---|
@@ -9,6 +9,7 @@ five intentionally text-focused examples exercise the safe `vllm-cpp` api: four 
 | [`concurrent`](concurrent.rs) | submits two asynchronous streaming requests and waits for both |
 | [`chat`](chat.rs) | runs a Clap-based interactive chat with conversation history and streaming output |
 | [`structured`](structured.rs) | extracts a fixed weather report under a JSON Schema |
+| [`video_generate`](video_generate.rs) | experimental MiniMax-H3 PPM/WAV generation with optional ffmpeg MP4 muxing; not validated end-to-end |
 | [`setup_test_model`](setup_test_model.rs) | resolves the pinned Qwen test fixture for `just setup-test-model`; not a general inference CLI |
 
 The library also supports pre-tokenized completion without adding another binary:
@@ -22,7 +23,7 @@ println!("{:?} truncated={}", result.token_ids, result.truncated);
 # Ok::<(), vllm_cpp::Error>(())
 ```
 
-`max_output_tokens` limits copied IDs, not native generation; truncation is determined from native completion metadata. Transcription, embedding, and video need task-specific checkpoints, media, and substantial resources, so their rustdoc/API documentation is authoritative rather than unvalidated runnable examples. Mux composition returns argument boundaries only and never executes ffmpeg.
+`max_output_tokens` limits copied IDs, not native generation; truncation is determined from native completion metadata. Transcription and embedding need task-specific checkpoints and inputs and have no runnable examples here; consult their rustdoc/API documentation. Video has the experimental `video_generate` CLI described below. Library mux composition returns argument boundaries only and never executes ffmpeg; the video example can optionally execute it.
 
 The four fixed examples (`complete`, `stream`, `concurrent`, and `structured`) accept the same manual model-source forms:
 
@@ -68,7 +69,7 @@ CMAKE_GENERATOR=Ninja \
   cargo run --locked --release -p vllm-cpp --features bundled --example EXAMPLE -- MODEL_SOURCE
 ```
 
-`bundled` is the default feature; it is shown explicitly here to identify the CPU backend. These commands demonstrate all five examples and the shared source syntax:
+`bundled` is the default feature; it is shown explicitly here to identify the CPU backend. These commands demonstrate all five text examples and the shared source syntax:
 
 ```console
 CMAKE_GENERATOR=Ninja cargo run --locked --release -p vllm-cpp --features bundled --example complete -- /path/to/model
@@ -105,6 +106,28 @@ CMAKE_GENERATOR=Ninja cargo run --locked --release -p vllm-cpp --example chat --
 `--prompt/-p <text>` and `--file/-f <path>` are mutually exclusive optional first user messages; prompt files must be UTF-8. `--system <text>` adds a retained system message. Generation options are `--max-tokens` (default `256`, maximum `2147483647`), `--temperature` (default `0.7`), `--top-p` (default `1`), `--top-k` (default `0`), `--min-p` (default `0`), and optional `--seed`. Responses stream by default; `--no-stream` selects blocking `Engine::chat_json` output. The CLI maintains the complete user/assistant history, submits it on each turn, and prints only assistant content rather than raw response JSON. Native role, reasoning, tool-call, and finish metadata is ignored; a valid response with no content is stored as an empty assistant message.
 
 At `user>` enter `/clear` to retain the system message while clearing other history, or `/quit`/`/exit` to stop. EOF also exits cleanly. A per-turn request or response error is reported as `chat: <error>`, the attempted turn is removed from history, and the prompt continues; terminal input/output errors and model startup failures still exit. This high-level example intentionally exposes a small chat-oriented subset. The library provides device, memory, pre-tokenized completion, and additional model controls that this CLI deliberately omits; the example does not attempt to mirror every native or library option.
+
+## experimental MiniMax-H3 video CLI
+
+`video_generate --prompt <TEXT> [OPTIONS]` is experimental, not validated end-to-end. Complete MiniMax-H3 checkpoints, ample memory/storage, and a compatible backend are required. See `--help` for artifact, generation, and reference options.
+
+Default `--device cuda` requires the [CUDA prerequisites](#experimental-cuda): compatible toolkit/driver and GPU, explicit `VLLM_CPP_CUDA_ARCHITECTURES`, and fresh `CARGO_TARGET_DIR`:
+
+```console
+CMAKE_GENERATOR=Ninja \
+  cargo run --locked --release -p vllm-cpp --features cuda --example video_generate -- \
+  --prompt "A quiet shoreline at sunrise" --workdir minimax-h3-output
+```
+
+On Nix, prefix `cargo run` with `nix develop .#cuda -c`; the default shell/build is CPU-only. Bundled builds without `cuda` reject CUDA before workdir creation/locking or Hub access. For `--no-default-features --features system`, native checks determine the library's independent CUDA capabilities, not Cargo features.
+
+`--device cpu` cannot run the default GGUF DiT: pinned CPU host forward needs F32, not block-quantized or `--dequant-bf16` BF16 weights. Custom artifacts do not establish backend support.
+
+Seven artifacts use the normal Hugging Face cache, `HF_HOME`, and nonempty `HF_TOKEN` (otherwise cached login). Repository/revision groups resolve through the Hub to commits, reusing cached files and downloading missing files; no offline flag exists. Defaults follow mutable `main`; pin `--gguf-revision`, `--encoder-revision`, `--vae-revision`, and `--config-revision` to immutable commits.
+
+`--partition ref2va` requires image/frames/audio, not FL2VA keyframes. Images use P6 PPM; audio uses uncompressed PCM16 WAV at 32 kHz.
+
+The workdir (default `minimax-h3-output`) is created and locked with `.video_generate.lock`; existing native outputs are refused. Output is `frame_%06d.ppm` and `audio.wav`. Optional `--output-mp4 <MP4>` runs ffmpeg (`--ffmpeg <PATH>` overrides it), publishing temporary output only to a new destination in an existing directory; reserved output aliases are refused. Mux failure preserves PPM/WAV; ffmpeg is otherwise unnecessary.
 
 ## optional nix shell
 
