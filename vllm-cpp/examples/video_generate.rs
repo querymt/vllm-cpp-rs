@@ -1406,7 +1406,22 @@ fn mux_mp4(
     let destination = canonical_parent.join(file_name);
     let mut private_output = PrivateMuxTarget::create(&canonical_parent)?;
 
-    let frame_pattern = frame_dir.join("frame_%06d.ppm");
+    let frame_pattern = {
+        // Escape the directory, not ffmpeg's frame-number placeholder.
+        #[cfg(unix)]
+        let frame_dir = {
+            use std::os::unix::ffi::{OsStrExt, OsStringExt};
+            let mut bytes = Vec::new();
+            for &b in frame_dir.as_os_str().as_bytes() {
+                bytes.push(b);
+                if b == b'%' {
+                    bytes.push(b);
+                }
+            }
+            PathBuf::from(std::ffi::OsString::from_vec(bytes))
+        };
+        frame_dir.join("frame_%06d.ppm")
+    };
     let argv = compose_video_mux_argv(
         &VideoMuxParams::new(frame_pattern, private_output.path())
             .audio_path(audio_path)
@@ -2530,8 +2545,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn mux_mp4_uses_private_output_preserves_arguments_and_cleans_up() {
+        use std::ffi::{OsStr, OsString};
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
         let temp = TempDir::new();
-        let frame_dir = temp.0.join("frames with spaces");
+        let frame_dir = temp
+            .0
+            .join(OsString::from_vec(b"50% frames \xff %06d".to_vec()));
         let audio = frame_dir.join("audio input.wav");
         let output = temp.0.join("output video.mp4");
         let executable = temp.0.join("fake-ffmpeg.sh");
@@ -2544,11 +2564,19 @@ mod tests {
         validate_mp4_output(&output, &frame_dir).expect("output passes preflight");
         mux_mp4(&frame_dir, &audio, 24, &output, &executable).expect("fake ffmpeg success");
 
-        let captured_text = fs::read_to_string(&capture).expect("read captured arguments");
-        let captured = captured_text.lines().collect::<Vec<_>>();
-        let private_path = PathBuf::from(captured.last().expect("captured private output"));
+        let captured_bytes = fs::read(&capture).expect("read captured arguments");
+        let captured = captured_bytes
+            .strip_suffix(b"\n")
+            .unwrap()
+            .split(|&b| b == b'\n')
+            .map(OsStr::from_bytes)
+            .collect::<Vec<_>>();
+        let private_path = PathBuf::from(*captured.last().expect("captured private output"));
+        let pattern = temp.0.join(OsString::from_vec(
+            b"50%% frames \xff %%06d/frame_%06d.ppm".to_vec(),
+        ));
         let mut expected = compose_video_mux_argv(
-            &VideoMuxParams::new(frame_dir.join("frame_%06d.ppm"), &private_path)
+            &VideoMuxParams::new(pattern, &private_path)
                 .audio_path(&audio)
                 .fps(24),
         )
@@ -2563,12 +2591,12 @@ mod tests {
             captured,
             expected
                 .iter()
-                .map(|argument| argument.to_str().expect("UTF-8 test argument"))
+                .map(|argument| argument.as_os_str())
                 .collect::<Vec<_>>()
         );
         assert!(!captured
             .iter()
-            .any(|argument| *argument == output.to_str().unwrap()));
+            .any(|argument| *argument == output.as_os_str()));
         assert_eq!(
             private_path.file_name().and_then(|name| name.to_str()),
             Some("mux.mp4")

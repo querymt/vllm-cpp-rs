@@ -1,6 +1,6 @@
 # examples
 
-five text examples and one experimental MiniMax-H3 video example exercise the safe `vllm-cpp` api: four text examples use fixed prompts and settings, and `chat` is an interactive command-line application. `video_generate` is runnable but has not been validated end-to-end. one additional maintainer utility prepares the optional pinned text fixture:
+Text/video examples use the safe `vllm-cpp` api. `video_generate` is experimental; `setup_test_model` is maintainer-only:
 
 | example | behavior |
 |---|---|
@@ -23,7 +23,7 @@ println!("{:?} truncated={}", result.token_ids, result.truncated);
 # Ok::<(), vllm_cpp::Error>(())
 ```
 
-`max_output_tokens` limits copied IDs, not native generation; truncation is determined from native completion metadata. Transcription and embedding need task-specific checkpoints and inputs and have no runnable examples here; consult their rustdoc/API documentation. Video has the experimental `video_generate` CLI described below. Library mux composition returns argument boundaries only and never executes ffmpeg; the video example can optionally execute it.
+`max_output_tokens` limits copied IDs, not generation; native metadata determines truncation. Transcription/embedding require task-specific checkpoints/inputs; see rustdoc, as neither has a runnable example. Library mux composition returns argv, never runs ffmpeg.
 
 The four fixed examples (`complete`, `stream`, `concurrent`, and `structured`) accept the same manual model-source forms:
 
@@ -109,9 +109,9 @@ At `user>` enter `/clear` to retain the system message while clearing other hist
 
 ## experimental MiniMax-H3 video CLI
 
-`video_generate --prompt <TEXT> [OPTIONS]` is experimental, not validated end-to-end. Complete MiniMax-H3 checkpoints, ample memory/storage, and a compatible backend are required. See `--help` for artifact, generation, and reference options.
+Experimental `video_generate --prompt <TEXT> [OPTIONS]` needs MiniMax-H3 checkpoints, ample memory/storage, and a compatible backend. See `--help`; end-to-end validation is pending.
 
-Default `--device cuda` requires the [CUDA prerequisites](#experimental-cuda): compatible toolkit/driver and GPU, explicit `VLLM_CPP_CUDA_ARCHITECTURES`, and fresh `CARGO_TARGET_DIR`:
+Before running default `--device cuda`, satisfy the [CUDA prerequisites](#experimental-cuda) and export `VLLM_CPP_CUDA_ARCHITECTURES` for your GPU and `CARGO_TARGET_DIR` naming a fresh build directory:
 
 ```console
 CMAKE_GENERATOR=Ninja \
@@ -119,15 +119,15 @@ CMAKE_GENERATOR=Ninja \
   --prompt "A quiet shoreline at sunrise" --workdir minimax-h3-output
 ```
 
-On Nix, prefix `cargo run` with `nix develop .#cuda -c`; the default shell/build is CPU-only. Bundled builds without `cuda` reject CUDA before workdir creation/locking or Hub access. For `--no-default-features --features system`, native checks determine the library's independent CUDA capabilities, not Cargo features.
+On Nix, prefix `cargo run` with `nix develop .#cuda -c`. Default bundled builds reject CUDA before workdir creation/locking or Hub access. With `--no-default-features --features system`, native checks determine CUDA capability.
 
-`--device cpu` cannot run the default GGUF DiT: pinned CPU host forward needs F32, not block-quantized or `--dequant-bf16` BF16 weights. Custom artifacts do not establish backend support.
+CPU needs F32 DiT, not the default quantized GGUF or `--dequant-bf16` BF16. Custom files do not establish backend support.
 
-Seven artifacts use the normal Hugging Face cache, `HF_HOME`, and nonempty `HF_TOKEN` (otherwise cached login). Repository/revision groups resolve through the Hub to commits, reusing cached files and downloading missing files; no offline flag exists. Defaults follow mutable `main`; pin `--gguf-revision`, `--encoder-revision`, `--vae-revision`, and `--config-revision` to immutable commits.
+Seven artifacts use the Hub cache (`HF_HOME`), nonempty `HF_TOKEN` or cached login. Hub queries pin revision groups to commits and fetch cache misses; no offline flag. Defaults follow mutable `main`; pin `--gguf-revision`, `--encoder-revision`, `--vae-revision`, and `--config-revision` to commits.
 
-`--partition ref2va` requires image/frames/audio, not FL2VA keyframes. Images use P6 PPM; audio uses uncompressed PCM16 WAV at 32 kHz.
+`--partition ref2va` needs image/frames/audio, not FL2VA keyframes. Images: P6 PPM; audio: PCM16 WAV, 32 kHz.
 
-The workdir (default `minimax-h3-output`) is created and locked with `.video_generate.lock`; existing native outputs are refused. Output is `frame_%06d.ppm` and `audio.wav`. Optional `--output-mp4 <MP4>` runs ffmpeg (`--ffmpeg <PATH>` overrides it), publishing temporary output only to a new destination in an existing directory; reserved output aliases are refused. Mux failure preserves PPM/WAV; ffmpeg is otherwise unnecessary.
+Workdir: `minimax-h3-output` by default; `.video_generate.lock` excludes writers. Existing native outputs are refused. Outputs: `frame_%06d.ppm`, `audio.wav`. `--output-mp4 <MP4>` runs ffmpeg (`--ffmpeg <PATH>`), publishing private output to a new path in an existing directory; reserved aliases are refused. Failure preserves PPM/WAV.
 
 ## optional nix shell
 
