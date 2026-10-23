@@ -97,10 +97,17 @@ sys: bindings-check header-check build-support-test backend-config backend-integ
 
 # Test all Linux CPU link modes and the exact shared-library exports.
 link-modes:
+    just --justfile '{{ root }}/Justfile' _link-modes \
+      '{{ root }}/vllm-cpp-sys' \
+      "${CARGO_TARGET_DIR:-{{ root }}/target/link-modes}"
+
+[private]
+_link-modes crate_root target_base:
     #!/usr/bin/env bash
     set -euo pipefail
-    repo_root={{ quote(root) }}
-    target_base=${CARGO_TARGET_DIR:-"$repo_root/target/link-modes"}
+    crate_root={{ quote(crate_root) }}
+    target_base={{ quote(target_base) }}
+    crate_root=$(cd "$crate_root" && pwd -P)
     mkdir -p "$target_base"
     target_base=$(cd "$target_base" && pwd -P)
     recipe_base="$target_base/vllm-cpp-sys-link-modes"
@@ -114,7 +121,7 @@ link-modes:
       esac
     }
     trap cleanup EXIT
-    cd "$repo_root"
+    cd "$crate_root"
     export CARGO_TERM_COLOR=never
 
     find_one() {
@@ -218,7 +225,7 @@ link-modes:
 
     prefix="$work/system-prefix"
     mkdir -p "$prefix/include" "$prefix/lib" "$prefix/lib64" "$prefix/blake3-lib"
-    cp vllm-cpp-sys/vllm.cpp/include/vllm.h "$prefix/include/"
+    cp vllm.cpp/include/vllm.h "$prefix/include/"
 
     bundled_static_lib=$(find_installed_library \
       "$bundled_static_target/release/build" libvllm.a)
@@ -395,8 +402,8 @@ package-test:
       echo 'could not read the native project version from vllm.cpp/CMakeLists.txt' >&2
       exit 1
     }
-    [[ $native_version == "$version" ]] || {
-      echo "native and crate versions differ: native=$native_version crates=$version" >&2
+    [[ $native_version == 0.0.2 ]] || {
+      echo "expected pinned native version 0.0.2, found $native_version" >&2
       exit 1
     }
     jq -e --arg version "$version" '
@@ -445,13 +452,14 @@ package-test:
     diff -u "$sys_list" <(archive_inventory "$sys_package" "vllm-cpp-sys-$version")
     diff -u "$safe_list" <(archive_inventory "$safe_package" "vllm-cpp-$safe_version")
 
+    native_exclude_pattern='^vllm\.cpp/cmake/(CudaArchFeaturesTest|CudaSourceGencodeTest|DumpTritonAOTContract|InSourceGuardTest|TritonAOTDefaultTest|TritonAOTMultiArchTest|VerifyExports)\.cmake$|^vllm\.cpp/include/vt/rocm/(rocm_gelu_mul_sep|rocm_gemma4_expert_geglu|rocm_matmul_batch|rocm_rmsnorm_plus_add)\.h$|^vllm\.cpp/src/vllm/entrypoints/openai/(api_server|server_main)\.cpp$|^vllm\.cpp/src/vllm/platforms/tenstorrent\.cpp$|^vllm\.cpp/src/vt/cuda/marlin/.*/generate_kernels\.py$|^vllm\.cpp/src/vt/rocm/[^/]+\.hip$|^vllm\.cpp/src/vt/tenstorrent/|^vllm\.cpp/src/vt/vulkan/shaders/'
     native_inventory() {
       local base=$1
       local member
       shift
       for member in "$@"; do
         find "$base/$member" -type f -print
-      done | sed "s#^$base/##" | LC_ALL=C sort
+      done | sed "s#^$base/##" | grep -Ev "$native_exclude_pattern" | LC_ALL=C sort
     }
     native_members=(
       vllm.cpp/CMakeLists.txt
@@ -461,9 +469,11 @@ package-test:
       vllm.cpp/include
       vllm.cpp/src
       vllm.cpp/scripts/triton-aot-compile.py
+      vllm.cpp/tests/vt/test_rocm_backend.cpp
       vllm.cpp/triton_kernels
       vllm.cpp/third_party/README.md
       vllm.cpp/third_party/blake3
+      vllm.cpp/third_party/doctest/doctest.h
       vllm.cpp/third_party/minja
       vllm.cpp/third_party/nlohmann
       vllm.cpp/third_party/vulkan
@@ -481,6 +491,7 @@ package-test:
         README.md \
         THIRD_PARTY.md \
         build.rs \
+        licenses/DOCTEST-MIT.txt \
         licenses/FLASH-ATTENTION-BSD-3-CLAUSE.txt \
         licenses/FLASH-LINEAR-ATTENTION-MIT.txt \
         src/bindings.rs \
@@ -500,7 +511,7 @@ package-test:
       <(native_inventory "$repo_root/vllm-cpp-sys" "${native_members[@]}") \
       <(native_inventory "$sys_root" "${native_members[@]}")
     diff -u \
-      <(printf '%s\n' CMakeLists.txt LICENSE NOTICE cmake include scripts src third_party triton_kernels | LC_ALL=C sort) \
+      <(printf '%s\n' CMakeLists.txt LICENSE NOTICE cmake include scripts src tests third_party triton_kernels | LC_ALL=C sort) \
       <(find "$sys_root/vllm.cpp" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
 
     safe_expected="$temp/vllm-cpp.expected"
@@ -535,6 +546,7 @@ package-test:
     required_sys_members=(
       README.md
       THIRD_PARTY.md
+      licenses/DOCTEST-MIT.txt
       licenses/FLASH-ATTENTION-BSD-3-CLAUSE.txt
       licenses/FLASH-LINEAR-ATTENTION-MIT.txt
       vllm.cpp/include/vllm.h
@@ -546,13 +558,24 @@ package-test:
       vllm.cpp/src/vt/cuda/cuda_matmul_fp8_cutlass.cu
       vllm.cpp/src/vt/cuda/flash_attn/src/flash.h
       vllm.cpp/src/vt/cuda/marlin/core/scalar_type.hpp
+      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_80/MANIFEST
+      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_86/MANIFEST
+      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_89/MANIFEST
+      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_90a/MANIFEST
+      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_100a/MANIFEST
       vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_121a/MANIFEST
+      vllm.cpp/src/vt/metal/metal_mlx_provider.mm
+      vllm.cpp/src/vt/vulkan/vulkan_spirv.h
+      vllm.cpp/src/vllm/platforms/rocm.cpp
+      vllm.cpp/include/vt/rocm/rocm_arch.h
+      vllm.cpp/include/vt/rocm/rocm_runtime.h
+      vllm.cpp/tests/vt/test_rocm_backend.cpp
       vllm.cpp/scripts/triton-aot-compile.py
       vllm.cpp/triton_kernels/chunk_delta_h.py
-      vllm.cpp/src/vt/vulkan/vulkan_spirv.h
       vllm.cpp/third_party/README.md
       vllm.cpp/third_party/blake3/LICENSE_A2
       vllm.cpp/third_party/blake3/LICENSE_CC0
+      vllm.cpp/third_party/doctest/doctest.h
       vllm.cpp/third_party/minja/LICENSE
       vllm.cpp/third_party/nlohmann/json.hpp
       vllm.cpp/third_party/vulkan/vulkan_core.h
@@ -580,10 +603,22 @@ package-test:
       vllm.cpp/benchmarks
       vllm.cpp/docs
       vllm.cpp/examples
-      vllm.cpp/tests
       vllm.cpp/tools
-      vllm.cpp/third_party/doctest
       vllm.cpp/third_party/httplib
+      vllm.cpp/cmake/CudaArchFeaturesTest.cmake
+      vllm.cpp/cmake/CudaSourceGencodeTest.cmake
+      vllm.cpp/cmake/DumpTritonAOTContract.cmake
+      vllm.cpp/cmake/InSourceGuardTest.cmake
+      vllm.cpp/cmake/TritonAOTDefaultTest.cmake
+      vllm.cpp/cmake/TritonAOTMultiArchTest.cmake
+      vllm.cpp/cmake/VerifyExports.cmake
+      vllm.cpp/src/vllm/entrypoints/openai/api_server.cpp
+      vllm.cpp/src/vllm/entrypoints/openai/server_main.cpp
+      vllm.cpp/src/vllm/platforms/tenstorrent.cpp
+      vllm.cpp/src/vt/cuda/marlin/libtorch_stable/moe/marlin_moe_wna16/generate_kernels.py
+      vllm.cpp/src/vt/rocm
+      vllm.cpp/src/vt/tenstorrent
+      vllm.cpp/src/vt/vulkan/shaders
     )
     for member in "${denied_sys_members[@]}"; do
       [[ ! -e $sys_root/$member ]] || {
@@ -591,6 +626,14 @@ package-test:
         exit 1
       }
     done
+    diff -u \
+      <(printf '%s\n' vllm.cpp/tests/vt/test_rocm_backend.cpp) \
+      <(find "$sys_root/vllm.cpp/tests" -type f -printf '%P\n' \
+        | sed 's#^#vllm.cpp/tests/#' | LC_ALL=C sort)
+    diff -u \
+      <(printf '%s\n' vllm.cpp/third_party/doctest/doctest.h) \
+      <(find "$sys_root/vllm.cpp/third_party/doctest" -type f -printf '%P\n' \
+        | sed 's#^#vllm.cpp/third_party/doctest/#' | LC_ALL=C sort)
 
     forbidden_pattern='(^|/)(target|stuff|\.git|\.github|__pycache__|\.cache|cache|fixtures?|downloads?|_deps|sdk)(/|$)|(^|/)(cutlass)(/|$)|(^|/)(model\.safetensors|tokenizer\.json|tokenizer_config\.json)$|\.(o|obj|a|so|dylib|dll|pyc|safetensors|gguf|pt|pth)$'
     for listing in "$sys_list" "$safe_list"; do
@@ -633,6 +676,7 @@ package-test:
         LICENSE-MIT \
         NOTICE \
         THIRD_PARTY.md \
+        licenses/DOCTEST-MIT.txt \
         licenses/FLASH-ATTENTION-BSD-3-CLAUSE.txt \
         licenses/FLASH-LINEAR-ATTENTION-MIT.txt \
         vllm.cpp/LICENSE \
@@ -671,13 +715,16 @@ package-test:
 
     sys_package_size=$(stat -c '%s' "$sys_package")
     sys_unpacked_size=$(du -sb "$sys_root" | cut -f1)
+    sys_regular_file_bytes=$(find "$sys_root" -type f -printf '%s\n' \
+      | awk '{ total += $1 } END { print total + 0 }')
+    sys_package_sha256=$(sha256sum "$sys_package" | awk '{ print $1 }')
     sys_entry_count=$(wc -l < "$sys_list")
     safe_package_size=$(stat -c '%s' "$safe_package")
     safe_unpacked_size=$(du -sb "$safe_root" | cut -f1)
     safe_entry_count=$(wc -l < "$safe_list")
     ((sys_package_size <= 6 * 1024 * 1024))
-    ((sys_unpacked_size <= 36 * 1024 * 1024))
-    ((sys_entry_count <= 1300))
+    ((sys_unpacked_size <= 40 * 1024 * 1024))
+    ((sys_entry_count <= 1400))
     ((safe_package_size <= 128 * 1024))
     ((safe_unpacked_size <= 256 * 1024))
     ((safe_entry_count <= 40))
@@ -693,11 +740,8 @@ package-test:
         and .[0].features.default == ["bundled"]
     ' <(cargo metadata --manifest-path "$sys_root/Cargo.toml" \
       --locked --offline --no-deps --format-version 1) >/dev/null
-    (
-      cd "$sys_root"
-      CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$temp_target" \
-        cargo test --locked --release --tests --offline
-    )
+    just --justfile "$repo_root/Justfile" _link-modes \
+      "$sys_root" "$temp/extracted-link-modes"
 
     sys_consumer="$temp/sys-consumer"
     mkdir -p "$sys_consumer/src"
@@ -819,8 +863,9 @@ package-test:
         cargo run --locked --release --offline
     )
 
-    printf 'sys package: %d entries, %d bytes unpacked, %d bytes compressed\n' \
-      "$sys_entry_count" "$sys_unpacked_size" "$sys_package_size"
+    printf 'sys package: %d entries, %d regular-file bytes, %d du bytes, %d compressed bytes, sha256 %s\n' \
+      "$sys_entry_count" "$sys_regular_file_bytes" "$sys_unpacked_size" \
+      "$sys_package_size" "$sys_package_sha256"
     printf 'safe package: %d entries, %d bytes unpacked, %d bytes compressed\n' \
       "$safe_entry_count" "$safe_unpacked_size" "$safe_package_size"
 

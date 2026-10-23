@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
-use std::ffi::{c_char, c_void, CStr, CString};
+#[cfg(feature = "bundled")]
+use std::ffi::CString;
+use std::ffi::{c_char, c_void, CStr};
 
 use vllm_cpp_sys as ffi;
 
@@ -101,8 +103,9 @@ fn reports_target_identity_and_handles_invalid_model_path() {
     assert!(!error.to_bytes().is_empty());
 }
 
+#[cfg(feature = "bundled")]
 #[test]
-fn server_entry_point_is_present_and_nonblocking_for_help_or_server_off() {
+fn bundled_server_entry_point_reports_the_server_off_stub() {
     let mut arguments = [
         CString::new("vllm-server").unwrap(),
         CString::new("--help").unwrap(),
@@ -112,14 +115,12 @@ fn server_entry_point_is_present_and_nonblocking_for_help_or_server_off() {
         .map(|argument| argument.as_ptr().cast_mut())
         .collect::<Vec<_>>();
     let status = unsafe { ffi::vllm_server_main(argv.len() as i32, argv.as_mut_ptr()) };
-    assert!(matches!(status, 0 | 1));
-    if status == 1 {
-        let error = unsafe { CStr::from_ptr(ffi::vllm_last_error()) };
-        assert!(error
-            .to_bytes()
-            .windows(13)
-            .any(|part| part == b"without VLLM_"));
-    }
+    assert_eq!(status, 1);
+    let error = unsafe { CStr::from_ptr(ffi::vllm_last_error()) };
+    assert_eq!(
+        error.to_bytes(),
+        b"vllm_server_main: this library was built without VLLM_CPP_SERVER; rebuild with -DVLLM_CPP_SERVER=ON to serve HTTP"
+    );
 }
 
 #[test]
