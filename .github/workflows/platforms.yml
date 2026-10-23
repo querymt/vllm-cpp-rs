@@ -38,9 +38,10 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
       - name: Install Just
-        uses: extractions/setup-just@v3.1.0
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
-          just-version: "1.40.0"
+          tool: just@1.40.0
+          fallback: none
       - name: Check exact MSRV
         env:
           RUSTUP_TOOLCHAIN: 1.85.0

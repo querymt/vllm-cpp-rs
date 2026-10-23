@@ -1419,6 +1419,12 @@ impl EngineBuilder {
         self
     }
 
+    /// Sets an explicit KV-cache block count.
+    ///
+    /// A positive count takes precedence over [`Self::kv_cache_memory_bytes`].
+    /// Zero leaves native auto-sizing enabled: the byte budget is used if set,
+    /// otherwise pinned vllm.cpp uses exactly 256 blocks. GPU memory profiling
+    /// is not implemented.
     #[must_use]
     pub fn num_blocks(mut self, value: u32) -> Self {
         self.config.num_blocks = Some(value);
@@ -1501,12 +1507,15 @@ impl EngineBuilder {
         self
     }
 
-    /// Sets the native fraction used by GPU memory profiling.
+    /// Forwards the native GPU memory utilization setting.
     ///
     /// The value must be finite and strictly positive. Values above `1.0` are
-    /// forwarded because the native ABI does not impose an upper bound. An
-    /// explicit block count takes precedence over absolute KV-cache bytes, which
-    /// take precedence over this utilization/profile setting.
+    /// forwarded because the native ABI does not impose an upper bound.
+    ///
+    /// Pinned vllm.cpp does not implement utilization-based memory profiling, so
+    /// this setting does not size the KV cache. A positive [`Self::num_blocks`]
+    /// takes precedence over [`Self::kv_cache_memory_bytes`]; without either
+    /// override, native code uses exactly 256 blocks regardless of this value.
     #[must_use]
     pub fn gpu_memory_utilization(mut self, value: f64) -> Self {
         self.config.gpu_memory_utilization = Some(value);
@@ -1515,10 +1524,11 @@ impl EngineBuilder {
 
     /// Sets an absolute KV-cache memory budget in bytes.
     ///
-    /// The value must be nonzero and fit the native signed 64-bit field. Native
-    /// code validates the model-dependent minimum. An explicit block count takes
-    /// precedence over this budget, and this budget takes precedence over GPU
-    /// utilization/profile sizing.
+    /// The value must be nonzero and fit the native signed 64-bit field.
+    /// A positive [`Self::num_blocks`] takes precedence. Otherwise, native code
+    /// divides this budget by the model-dependent bytes per block, rounds down,
+    /// and rejects a budget smaller than one block. Without either override,
+    /// pinned vllm.cpp uses exactly 256 blocks, not utilization-based profiling.
     #[must_use]
     pub fn kv_cache_memory_bytes(mut self, value: u64) -> Self {
         self.config.kv_cache_memory_bytes = Some(value);
@@ -1605,6 +1615,12 @@ impl EmbeddingEngineBuilder {
         self
     }
 
+    /// Sets an explicit KV-cache block count.
+    ///
+    /// A positive count takes precedence over [`Self::kv_cache_memory_bytes`].
+    /// Zero leaves native auto-sizing enabled: the byte budget is used if set,
+    /// otherwise pinned vllm.cpp uses exactly 256 blocks. GPU memory profiling
+    /// is not implemented.
     #[must_use]
     pub fn num_blocks(mut self, value: u32) -> Self {
         self.config.num_blocks = Some(value);
@@ -1642,11 +1658,15 @@ impl EmbeddingEngineBuilder {
         self
     }
 
-    /// Sets the native fraction used by GPU memory profiling.
+    /// Forwards the native GPU memory utilization setting.
     ///
-    /// The value must be finite and strictly positive. An explicit block count
-    /// takes precedence over absolute KV-cache bytes, which take precedence over
-    /// this utilization/profile setting.
+    /// The value must be finite and strictly positive. Values above `1.0` are
+    /// forwarded because the native ABI does not impose an upper bound.
+    ///
+    /// Pinned vllm.cpp does not implement utilization-based memory profiling, so
+    /// this setting does not size the KV cache. A positive [`Self::num_blocks`]
+    /// takes precedence over [`Self::kv_cache_memory_bytes`]; without either
+    /// override, native code uses exactly 256 blocks regardless of this value.
     #[must_use]
     pub fn gpu_memory_utilization(mut self, value: f64) -> Self {
         self.config.gpu_memory_utilization = Some(value);
@@ -1655,8 +1675,11 @@ impl EmbeddingEngineBuilder {
 
     /// Sets an absolute KV-cache memory budget in bytes.
     ///
-    /// The value must be nonzero and fit the native signed 64-bit field. An
-    /// explicit block count takes precedence over this budget.
+    /// The value must be nonzero and fit the native signed 64-bit field.
+    /// A positive [`Self::num_blocks`] takes precedence. Otherwise, native code
+    /// divides this budget by the model-dependent bytes per block, rounds down,
+    /// and rejects a budget smaller than one block. Without either override,
+    /// pinned vllm.cpp uses exactly 256 blocks, not utilization-based profiling.
     #[must_use]
     pub fn kv_cache_memory_bytes(mut self, value: u64) -> Self {
         self.config.kv_cache_memory_bytes = Some(value);

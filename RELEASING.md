@@ -148,7 +148,7 @@ The helper performs no registry mutation. Preserve its output with the release e
 
 ## Publish
 
-Only a separately authorized maintainer may publish from the exact reviewed commit with a clean root and detached submodule. Rerun the reviewed-root guard immediately before each upload. Publish sys first:
+Only a separately authorized maintainer may publish from the exact reviewed commit with a clean root and detached submodule. Rerun the reviewed-root guard immediately before each upload. Before any safe upload, set and validate the independently approved `VLLM_CPP_SAFE_ARCHIVE_SHA256` as described below. Publish sys first:
 
 ```console
 cargo publish -p vllm-cpp-sys --locked
@@ -157,7 +157,7 @@ cargo publish -p vllm-cpp --locked --dry-run
 cargo publish -p vllm-cpp --locked
 ```
 
-The full safe dry-run must resolve registry sys `0.0.2` before the safe upload. After both uploads, verify registry metadata, archives, docs.rs, licenses, and a clean downstream build. Create a tag and GitHub release only after separate authorization and only for the exact published commit.
+The full safe dry-run must resolve registry sys `0.0.2` before the safe upload. After every successful safe upload, including retries, run the registry-download hash check below before continuing: Cargo repackages during publication, so the local archive check alone does not prove which bytes were uploaded. Then verify registry metadata, docs.rs, licenses, and a clean downstream build. Create a tag and GitHub release only after separate authorization and only for the exact published commit.
 
 ### Retry or verify the safe crate
 
