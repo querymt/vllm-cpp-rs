@@ -531,6 +531,7 @@ package-test:
       examples/setup_test_model.rs \
       examples/stream.rs \
       examples/structured.rs \
+      src/abi.rs \
       src/callback.rs \
       src/engine.rs \
       src/error.rs \
@@ -726,7 +727,7 @@ package-test:
     ((sys_unpacked_size <= 40 * 1024 * 1024))
     ((sys_entry_count <= 1400))
     ((safe_package_size <= 128 * 1024))
-    ((safe_unpacked_size <= 256 * 1024))
+    ((safe_unpacked_size <= 512 * 1024))
     ((safe_entry_count <= 40))
 
     jq -e --arg version "$version" '

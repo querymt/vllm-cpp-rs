@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsString};
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of, MaybeUninit};
 use std::os::raw::c_char;
@@ -60,6 +60,178 @@ pub struct TranscriptionEngine {
 /// access.
 pub struct EmbeddingEngine {
     inner: OwnedEngine<EmbeddingTask>,
+}
+
+/// Device selection for the separate native video engine.
+///
+/// Video numbering is independent of [`Device`]: CPU is `0`, CUDA is `1`, and
+/// there is no automatic selection. Explicit CUDA never falls back to CPU.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum VideoDevice {
+    #[default]
+    Cpu,
+    Cuda,
+}
+
+impl VideoDevice {
+    fn as_native(self) -> i32 {
+        match self {
+            Self::Cpu => 0,
+            Self::Cuda => 1,
+        }
+    }
+}
+
+/// Declared MiniMax-H3 DiT partition.
+///
+/// Leaving the partition unset on [`VideoEngineBuilder`] preserves native
+/// validation and its guidance for checkpoints whose partition cannot be
+/// inferred safely.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum VideoPartition {
+    Fl2va,
+    Ref2va,
+}
+
+impl VideoPartition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fl2va => "fl2va",
+            Self::Ref2va => "ref2va",
+        }
+    }
+}
+
+/// Builder for a separate MiniMax-H3 video checkpoint set.
+#[derive(Clone, Debug)]
+pub struct VideoEngineBuilder {
+    config: VideoModelConfig,
+}
+
+/// Thread-local owner for blocking MiniMax-H3 video generation.
+///
+/// This type is neither `Send` nor `Sync`, is not cloneable, and requires
+/// exclusive mutable access for generation because native code only guarantees
+/// serialized generation per video handle. Model format, partition, task, and
+/// checkpoint capability checks remain native authority.
+pub struct VideoEngine {
+    raw: NonNull<ffi::vllm_video_engine>,
+    compatibility: Compatibility,
+    free: unsafe extern "C" fn(*mut ffi::vllm_video_engine),
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
+struct LoadedVideoEngine {
+    raw: NonNull<ffi::vllm_video_engine>,
+    compatibility: Compatibility,
+    free: unsafe extern "C" fn(*mut ffi::vllm_video_engine),
+}
+
+#[derive(Clone, Debug)]
+struct VideoModelConfig {
+    dit_path: PathBuf,
+    encoder_path: Option<PathBuf>,
+    tokenizer_path: Option<PathBuf>,
+    video_vae_path: Option<PathBuf>,
+    video_vae_config_path: Option<PathBuf>,
+    audio_vae_path: Option<PathBuf>,
+    audio_vae_config_path: Option<PathBuf>,
+    prompt_embeds_path: Option<PathBuf>,
+    partition: Option<VideoPartition>,
+    device: Option<VideoDevice>,
+    dequant_bf16: Option<bool>,
+    fp4_resident: Option<bool>,
+}
+
+struct MarshaledVideoModelParams {
+    raw: Option<ffi::vllm_video_model_params>,
+    dit_path: CString,
+    encoder_path: Option<CString>,
+    tokenizer_path: Option<CString>,
+    video_vae_path: CString,
+    video_vae_config_path: Option<CString>,
+    audio_vae_path: CString,
+    audio_vae_config_path: Option<CString>,
+    prompt_embeds_path: Option<CString>,
+    partition: Option<CString>,
+    device: Option<VideoDevice>,
+    dequant_bf16: Option<bool>,
+    fp4_resident: Option<bool>,
+}
+
+/// Parameters for one blocking video generation.
+#[derive(Clone, Debug)]
+pub struct VideoGenerationParams {
+    prompt: String,
+    output_dir: PathBuf,
+    dimensions: Option<(u32, u32)>,
+    num_frames: Option<u32>,
+    steps: Option<u32>,
+    seed: Option<u64>,
+    first_frame: Option<PathBuf>,
+    last_frame: Option<PathBuf>,
+    reference_image: Option<PathBuf>,
+    reference_video: Option<PathBuf>,
+    reference_audio: Option<PathBuf>,
+    noise_augmentation: Option<f32>,
+}
+
+struct MarshaledVideoGenerationParams {
+    raw: Option<ffi::vllm_video_params>,
+    prompt: CString,
+    output_dir: CString,
+    dimensions: Option<(i32, i32)>,
+    num_frames: Option<i32>,
+    steps: Option<i32>,
+    seed: Option<u64>,
+    first_frame: Option<CString>,
+    last_frame: Option<CString>,
+    reference_image: Option<CString>,
+    reference_video: Option<CString>,
+    reference_audio: Option<CString>,
+    noise_augmentation: Option<f32>,
+}
+
+/// Rust-owned output from one completed video generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VideoResult {
+    frame_dir: PathBuf,
+    audio_path: PathBuf,
+    frame_count: u32,
+    width: u32,
+    height: u32,
+    fps: u32,
+    sample_rate: u32,
+    mux_argv: VideoMuxArgv,
+}
+
+/// Inputs for standalone ffmpeg argument composition.
+#[derive(Clone, Debug)]
+pub struct VideoMuxParams {
+    frame_pattern: PathBuf,
+    output_path: PathBuf,
+    audio_path: Option<PathBuf>,
+    fps: Option<u32>,
+    crf: Option<u32>,
+}
+
+struct MarshaledVideoMuxParams {
+    raw: Option<ffi::vllm_video_mux_params>,
+    frame_pattern: CString,
+    output_path: CString,
+    audio_path: Option<CString>,
+    fps: Option<i32>,
+    crf: Option<i32>,
+}
+
+/// Owned argument boundaries composed by native code for ffmpeg.
+///
+/// This is data only. It cannot execute a process or produce a shell command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VideoMuxArgv {
+    args: Vec<OsString>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -266,6 +438,294 @@ impl MarshaledModelParams {
     }
 }
 
+impl VideoModelConfig {
+    fn new(dit_path: impl Into<PathBuf>) -> Self {
+        Self {
+            dit_path: dit_path.into(),
+            encoder_path: None,
+            tokenizer_path: None,
+            video_vae_path: None,
+            video_vae_config_path: None,
+            audio_vae_path: None,
+            audio_vae_config_path: None,
+            prompt_embeds_path: None,
+            partition: None,
+            device: None,
+            dequant_bf16: None,
+            fp4_resident: None,
+        }
+    }
+}
+
+impl MarshaledVideoModelParams {
+    fn new(config: VideoModelConfig) -> Result<Self, Error> {
+        Ok(Self {
+            raw: None,
+            dit_path: nonempty_path_to_cstring(&config.dit_path, "video DiT path")?,
+            encoder_path: optional_nonempty_path_to_cstring(
+                config.encoder_path.as_deref(),
+                "video encoder path",
+            )?,
+            tokenizer_path: optional_nonempty_path_to_cstring(
+                config.tokenizer_path.as_deref(),
+                "video tokenizer path",
+            )?,
+            video_vae_path: required_optional_path_to_cstring(
+                config.video_vae_path.as_deref(),
+                "video VAE path",
+            )?,
+            video_vae_config_path: optional_nonempty_path_to_cstring(
+                config.video_vae_config_path.as_deref(),
+                "video VAE config path",
+            )?,
+            audio_vae_path: required_optional_path_to_cstring(
+                config.audio_vae_path.as_deref(),
+                "audio VAE path",
+            )?,
+            audio_vae_config_path: optional_nonempty_path_to_cstring(
+                config.audio_vae_config_path.as_deref(),
+                "audio VAE config path",
+            )?,
+            prompt_embeds_path: optional_nonempty_path_to_cstring(
+                config.prompt_embeds_path.as_deref(),
+                "prompt embeddings path",
+            )?,
+            partition: config
+                .partition
+                .map(|value| to_cstring(value.as_str(), "video partition"))
+                .transpose()?,
+            device: config.device,
+            dequant_bf16: config.dequant_bf16,
+            fp4_resident: config.fp4_resident,
+        })
+    }
+
+    fn apply_defaults(&mut self, mut raw: ffi::vllm_video_model_params) {
+        raw.dit_path = self.dit_path.as_ptr();
+        raw.video_vae_path = self.video_vae_path.as_ptr();
+        raw.audio_vae_path = self.audio_vae_path.as_ptr();
+        if let Some(value) = &self.encoder_path {
+            raw.encoder_path = value.as_ptr();
+        }
+        if let Some(value) = &self.tokenizer_path {
+            raw.tokenizer_path = value.as_ptr();
+        }
+        if let Some(value) = &self.video_vae_config_path {
+            raw.video_vae_config_path = value.as_ptr();
+        }
+        if let Some(value) = &self.audio_vae_config_path {
+            raw.audio_vae_config_path = value.as_ptr();
+        }
+        if let Some(value) = &self.prompt_embeds_path {
+            raw.prompt_embeds_path = value.as_ptr();
+        }
+        if let Some(value) = &self.partition {
+            raw.partition = value.as_ptr();
+        }
+        if let Some(value) = self.device {
+            raw.device = value.as_native();
+        }
+        if let Some(value) = self.dequant_bf16 {
+            raw.dequant_bf16 = i32::from(value);
+        }
+        if let Some(value) = self.fp4_resident {
+            raw.fp4_resident = i32::from(value);
+        }
+        self.raw = Some(raw);
+    }
+
+    fn raw(&self) -> &ffi::vllm_video_model_params {
+        self.raw
+            .as_ref()
+            .expect("native defaults must be applied before video model loading")
+    }
+}
+
+impl MarshaledVideoGenerationParams {
+    fn new(params: &VideoGenerationParams) -> Result<Self, Error> {
+        let dimensions = params
+            .dimensions
+            .map(|(width, height)| {
+                if width == 0 || height == 0 {
+                    return Err(invalid_configuration(
+                        "video width and height must be greater than zero",
+                    ));
+                }
+                Ok((
+                    u32_to_i32(width, "video width")?,
+                    u32_to_i32(height, "video height")?,
+                ))
+            })
+            .transpose()?;
+        let num_frames = match params.num_frames {
+            Some(value) if value <= 1 => {
+                return Err(invalid_configuration(
+                    "video num_frames must be greater than one",
+                ));
+            }
+            value => optional_u32_to_i32(value, "video num_frames")?,
+        };
+        let steps = match params.steps {
+            Some(0) => {
+                return Err(invalid_configuration(
+                    "video steps must be greater than zero",
+                ));
+            }
+            value => optional_u32_to_i32(value, "video steps")?,
+        };
+        let noise_augmentation = match params.noise_augmentation {
+            Some(value) if !value.is_finite() || value <= 0.0 => {
+                return Err(invalid_configuration(
+                    "video noise augmentation must be finite and strictly positive",
+                ));
+            }
+            value => value,
+        };
+
+        let has_keyframes = params.first_frame.is_some() || params.last_frame.is_some();
+        let has_references = params.reference_image.is_some()
+            || params.reference_video.is_some()
+            || params.reference_audio.is_some();
+        if has_keyframes && has_references {
+            return Err(invalid_configuration(
+                "video keyframes cannot be combined with reference image, video, or audio",
+            ));
+        }
+        if params.reference_image.is_some() && params.reference_video.is_some() {
+            return Err(invalid_configuration(
+                "video reference image and reference video are mutually exclusive",
+            ));
+        }
+
+        let output_dir = nonempty_path_to_cstring(&params.output_dir, "video output directory")?;
+        validate_video_frame_path_length(&output_dir, "video output directory")?;
+        let reference_video = optional_nonempty_path_to_cstring(
+            params.reference_video.as_deref(),
+            "reference video directory",
+        )?;
+        if let Some(value) = &reference_video {
+            validate_video_frame_path_length(value, "reference video directory")?;
+        }
+
+        Ok(Self {
+            raw: None,
+            prompt: to_cstring(&params.prompt, "video prompt")?,
+            output_dir,
+            dimensions,
+            num_frames,
+            steps,
+            seed: params.seed,
+            first_frame: optional_nonempty_path_to_cstring(
+                params.first_frame.as_deref(),
+                "first frame path",
+            )?,
+            last_frame: optional_nonempty_path_to_cstring(
+                params.last_frame.as_deref(),
+                "last frame path",
+            )?,
+            reference_image: optional_nonempty_path_to_cstring(
+                params.reference_image.as_deref(),
+                "reference image path",
+            )?,
+            reference_video,
+            reference_audio: optional_nonempty_path_to_cstring(
+                params.reference_audio.as_deref(),
+                "reference audio path",
+            )?,
+            noise_augmentation,
+        })
+    }
+
+    fn apply_defaults(&mut self, mut raw: ffi::vllm_video_params) {
+        raw.prompt = self.prompt.as_ptr();
+        raw.output_dir = self.output_dir.as_ptr();
+        if let Some((width, height)) = self.dimensions {
+            raw.width = width;
+            raw.height = height;
+        }
+        if let Some(value) = self.num_frames {
+            raw.num_frames = value;
+        }
+        if let Some(value) = self.steps {
+            raw.steps = value;
+        }
+        if let Some(value) = self.seed {
+            raw.seed = value;
+            raw.has_seed = 1;
+        }
+        if let Some(value) = &self.first_frame {
+            raw.first_frame = value.as_ptr();
+        }
+        if let Some(value) = &self.last_frame {
+            raw.last_frame = value.as_ptr();
+        }
+        if let Some(value) = &self.reference_image {
+            raw.ref_image = value.as_ptr();
+        }
+        if let Some(value) = &self.reference_video {
+            raw.ref_video = value.as_ptr();
+        }
+        if let Some(value) = &self.reference_audio {
+            raw.ref_audio = value.as_ptr();
+        }
+        if let Some(value) = self.noise_augmentation {
+            raw.noise_aug = value;
+        }
+        self.raw = Some(raw);
+    }
+
+    fn raw(&self) -> &ffi::vllm_video_params {
+        self.raw
+            .as_ref()
+            .expect("native defaults must be applied before video generation")
+    }
+}
+
+impl MarshaledVideoMuxParams {
+    fn new(params: &VideoMuxParams) -> Result<Self, Error> {
+        let fps = match params.fps {
+            Some(0) => return Err(invalid_configuration("video mux fps must be positive")),
+            value => optional_u32_to_i32(value, "video mux fps")?,
+        };
+        let crf = match params.crf {
+            Some(0) => return Err(invalid_configuration("video mux crf must be positive")),
+            value => optional_u32_to_i32(value, "video mux crf")?,
+        };
+        Ok(Self {
+            raw: None,
+            frame_pattern: nonempty_path_to_cstring(&params.frame_pattern, "video frame pattern")?,
+            output_path: nonempty_path_to_cstring(&params.output_path, "video output path")?,
+            audio_path: optional_nonempty_path_to_cstring(
+                params.audio_path.as_deref(),
+                "video audio path",
+            )?,
+            fps,
+            crf,
+        })
+    }
+
+    fn apply_defaults(&mut self, mut raw: ffi::vllm_video_mux_params) {
+        raw.frames = self.frame_pattern.as_ptr();
+        raw.output_path = self.output_path.as_ptr();
+        if let Some(value) = &self.audio_path {
+            raw.audio_path = value.as_ptr();
+        }
+        if let Some(value) = self.fps {
+            raw.fps = value;
+        }
+        if let Some(value) = self.crf {
+            raw.crf = value;
+        }
+        self.raw = Some(raw);
+    }
+
+    fn raw(&self) -> &ffi::vllm_video_mux_params {
+        self.raw
+            .as_ref()
+            .expect("native defaults must be applied before video mux composition")
+    }
+}
+
 /// Why native generation finished.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -366,6 +826,338 @@ impl EmbeddingResult {
     pub fn rows(&self) -> std::slice::ChunksExact<'_, f32> {
         self.values.chunks_exact(self.dimension)
     }
+}
+
+impl VideoEngineBuilder {
+    #[must_use]
+    pub fn new(dit_path: impl Into<PathBuf>) -> Self {
+        Self {
+            config: VideoModelConfig::new(dit_path),
+        }
+    }
+
+    #[must_use]
+    pub fn encoder_path(mut self, value: impl Into<PathBuf>) -> Self {
+        self.config.encoder_path = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn tokenizer_path(mut self, value: impl Into<PathBuf>) -> Self {
+        self.config.tokenizer_path = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn video_vae_path(mut self, value: impl Into<PathBuf>) -> Self {
+        self.config.video_vae_path = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn video_vae_config_path(mut self, value: impl Into<PathBuf>) -> Self {
+        self.config.video_vae_config_path = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn audio_vae_path(mut self, value: impl Into<PathBuf>) -> Self {
+        self.config.audio_vae_path = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn audio_vae_config_path(mut self, value: impl Into<PathBuf>) -> Self {
+        self.config.audio_vae_config_path = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn prompt_embeds_path(mut self, value: impl Into<PathBuf>) -> Self {
+        self.config.prompt_embeds_path = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn partition(mut self, value: VideoPartition) -> Self {
+        self.config.partition = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn device(mut self, value: VideoDevice) -> Self {
+        self.config.device = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn dequant_bf16(mut self, value: bool) -> Self {
+        self.config.dequant_bf16 = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn fp4_resident(mut self, value: bool) -> Self {
+        self.config.fp4_resident = Some(value);
+        self
+    }
+
+    /// Loads the separate video checkpoint set.
+    ///
+    /// The DiT, video VAE, and audio VAE paths are required and must be
+    /// nonempty. Rust does not infer model format, partition, or task; native
+    /// loading remains authoritative.
+    pub fn load(self) -> Result<VideoEngine, Error> {
+        load_video_engine(self.config).map(VideoEngine::from)
+    }
+}
+
+impl VideoEngine {
+    /// Starts configuring a separate video engine from its DiT path.
+    pub fn builder(dit_path: impl Into<PathBuf>) -> VideoEngineBuilder {
+        VideoEngineBuilder::new(dit_path)
+    }
+
+    /// Runs one blocking, serialized, resource-intensive generation.
+    ///
+    /// Native code performs computation before creating `output_dir` and its
+    /// parents, then writes or truncates `frame_%06d.ppm` and `audio.wav`.
+    /// Existing extra files are left stale, and failure may leave partial
+    /// artifacts. Rust does not create, remove, roll back, canonicalize, confine,
+    /// or reject symlinked paths. Callers must trust paths, provision disk and
+    /// compute resources, and clean outputs. There is no cancellation, timeout,
+    /// quota, resource limit, or sandbox.
+    ///
+    /// The result includes ffmpeg argument boundaries for
+    /// `<output_dir>/video.mp4`, but neither generation nor this crate creates
+    /// that MP4 or executes ffmpeg. Encoded output and reference-video directory
+    /// paths are limited to 481 bytes to prevent native frame-path truncation.
+    pub fn generate(&mut self, params: &VideoGenerationParams) -> Result<VideoResult, Error> {
+        let mut params = MarshaledVideoGenerationParams::new(params)?;
+        params.apply_defaults(self.compatibility.video_params_default());
+        generate_video_with(
+            params.raw(),
+            |params, output| {
+                // SAFETY: the exclusive engine handle and all marshaled strings
+                // remain live for this blocking call; output initializes on OK.
+                unsafe { ffi::vllm_video_generate(self.raw.as_ptr(), params, output) }
+            },
+            ffi::vllm_video_result_free,
+        )
+    }
+}
+
+impl Drop for VideoEngine {
+    fn drop(&mut self) {
+        // SAFETY: this owner uniquely releases one live video handle once.
+        unsafe { (self.free)(self.raw.as_ptr()) };
+    }
+}
+
+impl From<LoadedVideoEngine> for VideoEngine {
+    fn from(loaded: LoadedVideoEngine) -> Self {
+        Self {
+            raw: loaded.raw,
+            compatibility: loaded.compatibility,
+            free: loaded.free,
+            _not_send_sync: PhantomData,
+        }
+    }
+}
+
+impl VideoGenerationParams {
+    #[must_use]
+    pub fn new(prompt: impl Into<String>, output_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            output_dir: output_dir.into(),
+            dimensions: None,
+            num_frames: None,
+            steps: None,
+            seed: None,
+            first_frame: None,
+            last_frame: None,
+            reference_image: None,
+            reference_video: None,
+            reference_audio: None,
+            noise_augmentation: None,
+        }
+    }
+
+    #[must_use]
+    pub fn dimensions(mut self, width: u32, height: u32) -> Self {
+        self.dimensions = Some((width, height));
+        self
+    }
+
+    #[must_use]
+    pub fn num_frames(mut self, value: u32) -> Self {
+        self.num_frames = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn steps(mut self, value: u32) -> Self {
+        self.steps = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn seed(mut self, value: u64) -> Self {
+        self.seed = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn first_frame(mut self, value: impl Into<PathBuf>) -> Self {
+        self.first_frame = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn last_frame(mut self, value: impl Into<PathBuf>) -> Self {
+        self.last_frame = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn reference_image(mut self, value: impl Into<PathBuf>) -> Self {
+        self.reference_image = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn reference_video(mut self, value: impl Into<PathBuf>) -> Self {
+        self.reference_video = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn reference_audio(mut self, value: impl Into<PathBuf>) -> Self {
+        self.reference_audio = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn noise_augmentation(mut self, value: f32) -> Self {
+        self.noise_augmentation = Some(value);
+        self
+    }
+
+    /// Validates Rust-side structural rules without loading a model or doing I/O.
+    ///
+    /// Model task, partition, capabilities, media contents, and checkpoint
+    /// compatibility remain native validation during loading or generation.
+    pub fn validate(&self) -> Result<(), Error> {
+        MarshaledVideoGenerationParams::new(self).map(drop)
+    }
+}
+
+impl VideoResult {
+    #[must_use]
+    pub fn frame_dir(&self) -> &Path {
+        &self.frame_dir
+    }
+
+    #[must_use]
+    pub fn audio_path(&self) -> &Path {
+        &self.audio_path
+    }
+
+    #[must_use]
+    pub fn frame_count(&self) -> u32 {
+        self.frame_count
+    }
+
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    #[must_use]
+    pub fn fps(&self) -> u32 {
+        self.fps
+    }
+
+    #[must_use]
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    #[must_use]
+    pub fn mux_argv(&self) -> &VideoMuxArgv {
+        &self.mux_argv
+    }
+}
+
+impl VideoMuxParams {
+    #[must_use]
+    pub fn new(frame_pattern: impl Into<PathBuf>, output_path: impl Into<PathBuf>) -> Self {
+        Self {
+            frame_pattern: frame_pattern.into(),
+            output_path: output_path.into(),
+            audio_path: None,
+            fps: None,
+            crf: None,
+        }
+    }
+
+    #[must_use]
+    pub fn audio_path(mut self, value: impl Into<PathBuf>) -> Self {
+        self.audio_path = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn fps(mut self, value: u32) -> Self {
+        self.fps = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn crf(mut self, value: u32) -> Self {
+        self.crf = Some(value);
+        self
+    }
+}
+
+impl VideoMuxArgv {
+    #[must_use]
+    pub fn args(&self) -> &[OsString] {
+        &self.args
+    }
+
+    #[must_use]
+    pub fn into_args(self) -> Vec<OsString> {
+        self.args
+    }
+}
+
+/// Composes owned ffmpeg argument boundaries without filesystem or process I/O.
+///
+/// This function does not locate or execute ffmpeg and does not inspect input or
+/// output paths. Pass arguments separately rather than shell-joining them.
+/// Native argv starts with `ffmpeg`, which requests `PATH` lookup if a caller
+/// later executes it, and includes `-y`, which permits output overwrite. A caller
+/// that executes these untrusted-path arguments owns binary selection,
+/// confinement, cancellation, resource limits, cleanup, and all process policy.
+pub fn compose_video_mux_argv(params: &VideoMuxParams) -> Result<VideoMuxArgv, Error> {
+    compose_video_mux_argv_with(
+        params,
+        Compatibility::check,
+        |compatibility| compatibility.video_mux_params_default(),
+        |params, output, count| {
+            // SAFETY: marshaled strings and writable outputs remain live for the
+            // blocking composition call. Native performs no process or file I/O.
+            unsafe { ffi::vllm_video_mux_argv(params, output, count) }
+        },
+        ffi::vllm_video_mux_argv_free,
+    )
 }
 
 impl Engine {
@@ -820,6 +1612,155 @@ fn load_engine_with<Task>(
     })
 }
 
+fn load_video_engine(config: VideoModelConfig) -> Result<LoadedVideoEngine, Error> {
+    load_video_engine_with(
+        config,
+        Compatibility::check,
+        |compatibility| compatibility.video_model_params_default(),
+        |params, output| {
+            // SAFETY: every pointer in params is backed by live marshaled storage,
+            // and output points to writable handle storage for this call.
+            unsafe { ffi::vllm_video_engine_load(params, output) }
+        },
+        status_result,
+        ffi::vllm_video_engine_free,
+    )
+}
+
+fn load_video_engine_with(
+    config: VideoModelConfig,
+    check: impl FnOnce() -> Result<Compatibility, Error>,
+    defaults: impl FnOnce(&Compatibility) -> ffi::vllm_video_model_params,
+    load: impl FnOnce(
+        &ffi::vllm_video_model_params,
+        *mut *mut ffi::vllm_video_engine,
+    ) -> ffi::vllm_status,
+    status: impl FnOnce(ffi::vllm_status) -> Result<(), Error>,
+    free: unsafe extern "C" fn(*mut ffi::vllm_video_engine),
+) -> Result<LoadedVideoEngine, Error> {
+    let mut params = MarshaledVideoModelParams::new(config)?;
+    let compatibility = check()?;
+    params.apply_defaults(defaults(&compatibility));
+
+    let mut output = ptr::null_mut();
+    let native_status = load(params.raw(), &mut output);
+    if native_status != ffi::vllm_status_VLLM_OK {
+        let error =
+            status(native_status).expect_err("a non-OK video load status must produce an error");
+        if let Some(output) = NonNull::new(output) {
+            // SAFETY: a non-null failure output is still native-allocated. The
+            // thread-local error was copied before this defensive FFI cleanup.
+            unsafe { free(output.as_ptr()) };
+        }
+        return Err(error);
+    }
+
+    let raw = NonNull::new(output).ok_or_else(|| {
+        invalid_native_output(
+            "video engine handle",
+            "vllm_video_engine_load succeeded without a handle",
+        )
+    })?;
+    Ok(LoadedVideoEngine {
+        raw,
+        compatibility,
+        free,
+    })
+}
+
+fn generate_video_with(
+    params: &ffi::vllm_video_params,
+    call: impl FnOnce(*const ffi::vllm_video_params, *mut ffi::vllm_video_result) -> ffi::vllm_status,
+    free: unsafe extern "C" fn(*mut ffi::vllm_video_result),
+) -> Result<VideoResult, Error> {
+    let mut raw = MaybeUninit::<ffi::vllm_video_result>::uninit();
+    let status = call(params, raw.as_mut_ptr());
+    status_result(status)?;
+    // SAFETY: VLLM_OK initializes every video result field.
+    let raw = unsafe { raw.assume_init() };
+    let guard = NativeResultGuard::new(raw, free);
+    video_result_from_raw(guard.raw())
+}
+
+fn compose_video_mux_argv_with(
+    params: &VideoMuxParams,
+    check: impl FnOnce() -> Result<Compatibility, Error>,
+    defaults: impl FnOnce(&Compatibility) -> ffi::vllm_video_mux_params,
+    call: impl FnOnce(
+        *const ffi::vllm_video_mux_params,
+        *mut *mut *mut c_char,
+        *mut i32,
+    ) -> ffi::vllm_status,
+    free: unsafe extern "C" fn(*mut *mut c_char, i32),
+) -> Result<VideoMuxArgv, Error> {
+    let mut params = MarshaledVideoMuxParams::new(params)?;
+    let compatibility = check()?;
+    params.apply_defaults(defaults(&compatibility));
+
+    let mut argv = ptr::null_mut();
+    let mut argc = 0;
+    let status = call(params.raw(), &mut argv, &mut argc);
+    status_result(status)?;
+    let guard = NativeVideoMuxArgvGuard { argv, argc, free };
+    video_mux_argv_from_raw(guard.argv, guard.argc, "video mux argv")
+}
+
+fn video_result_from_raw(raw: &ffi::vllm_video_result) -> Result<VideoResult, Error> {
+    Ok(VideoResult {
+        frame_dir: c_path_to_owned(raw.frame_dir, "video frame directory")?,
+        audio_path: c_path_to_owned(raw.audio_path, "video audio path")?,
+        frame_count: positive_native_i32(raw.frame_count, "video frame count")?,
+        width: positive_native_i32(raw.width, "video width")?,
+        height: positive_native_i32(raw.height, "video height")?,
+        fps: positive_native_i32(raw.fps, "video fps")?,
+        sample_rate: positive_native_i32(raw.sample_rate, "video sample rate")?,
+        mux_argv: video_mux_argv_from_raw(raw.mux_argv, raw.mux_argc, "video result mux argv")?,
+    })
+}
+
+fn video_mux_argv_from_raw(
+    argv: *mut *mut c_char,
+    argc: i32,
+    field: &'static str,
+) -> Result<VideoMuxArgv, Error> {
+    let argc = usize::try_from(argc)
+        .map_err(|_| invalid_native_output(field, "argument count is negative"))?;
+    if argc == 0 {
+        return Err(invalid_native_output(field, "argument count is zero"));
+    }
+    let terminated_count = argc
+        .checked_add(1)
+        .ok_or_else(|| invalid_native_output(field, "argument count overflows usize"))?;
+    validate_pointer_count(argv.cast_const(), terminated_count, field)?;
+    // SAFETY: validation established an aligned, non-null, addressable array of
+    // argc entries plus its required terminator, live under the native guard.
+    let pointers = unsafe { std::slice::from_raw_parts(argv.cast_const(), terminated_count) };
+    if !pointers[argc].is_null() {
+        return Err(invalid_native_output(
+            field,
+            "trailing argv entry is not null",
+        ));
+    }
+
+    let mut args = Vec::new();
+    args.try_reserve_exact(argc)
+        .map_err(|_| invalid_native_output(field, "argument vector cannot be allocated"))?;
+    for &pointer in &pointers[..argc] {
+        if pointer.is_null() {
+            return Err(invalid_native_output(field, "argument entry is null"));
+        }
+        args.push(c_os_string_to_owned(pointer, field)?);
+    }
+    Ok(VideoMuxArgv { args })
+}
+
+fn positive_native_i32(value: i32, field: &'static str) -> Result<u32, Error> {
+    if value <= 0 {
+        return Err(invalid_native_output(field, "value is not positive"));
+    }
+    Ok(value as u32)
+}
+
 fn validate_token_input(prompt_len: usize, capacity: usize) -> Result<(i32, i32), Error> {
     if prompt_len == 0 {
         return Err(invalid_configuration("prompt_tokens must not be empty"));
@@ -1173,6 +2114,12 @@ fn validate_pointer_count<T>(
             "element count exceeds addressable slice size",
         ));
     }
+    let byte_len = length
+        .checked_mul(size_of::<T>())
+        .ok_or_else(|| invalid_native_output(field, "byte count overflows usize"))?;
+    (pointer as usize)
+        .checked_add(byte_len)
+        .ok_or_else(|| invalid_native_output(field, "pointer range wraps address space"))?;
     Ok(())
 }
 
@@ -1262,6 +2209,45 @@ fn path_to_cstring(path: &Path, field: &'static str) -> Result<CString, Error> {
         .and_then(|value| to_cstring(value, field))
 }
 
+fn nonempty_path_to_cstring(path: &Path, field: &'static str) -> Result<CString, Error> {
+    if path.as_os_str().is_empty() {
+        return Err(invalid_configuration(format!("{field} must not be empty")));
+    }
+    path_to_cstring(path, field)
+}
+
+fn optional_nonempty_path_to_cstring(
+    path: Option<&Path>,
+    field: &'static str,
+) -> Result<Option<CString>, Error> {
+    path.map(|path| nonempty_path_to_cstring(path, field))
+        .transpose()
+}
+
+fn required_optional_path_to_cstring(
+    path: Option<&Path>,
+    field: &'static str,
+) -> Result<CString, Error> {
+    path.ok_or_else(|| invalid_configuration(format!("{field} is required")))
+        .and_then(|path| nonempty_path_to_cstring(path, field))
+}
+
+fn u32_to_i32(value: u32, field: &'static str) -> Result<i32, Error> {
+    i32::try_from(value)
+        .map_err(|_| invalid_configuration(format!("{field} exceeds native i32 range")))
+}
+
+fn validate_video_frame_path_length(path: &CString, field: &'static str) -> Result<(), Error> {
+    // Native appends "/frame_%06d.ppm" in a fixed 512-byte buffer. Keeping the
+    // encoded directory at 481 bytes or fewer prevents unchecked truncation.
+    if path.as_bytes().len() > 481 {
+        return Err(invalid_configuration(format!(
+            "{field} exceeds the 481-byte video frame path limit"
+        )));
+    }
+    Ok(())
+}
+
 fn c_string_to_owned(pointer: *const c_char, field: &'static str) -> Result<String, Error> {
     if pointer.is_null() {
         return Err(Error::InvalidUtf8 { field });
@@ -1270,6 +2256,42 @@ fn c_string_to_owned(pointer: *const c_char, field: &'static str) -> Result<Stri
     unsafe { CStr::from_ptr(pointer) }
         .to_str()
         .map(str::to_owned)
+        .map_err(|_| Error::InvalidUtf8 { field })
+}
+
+fn c_path_to_owned(pointer: *const c_char, field: &'static str) -> Result<PathBuf, Error> {
+    if pointer.is_null() {
+        return Err(invalid_native_output(field, "path pointer is null"));
+    }
+    // SAFETY: successful native video outputs are live NUL-terminated strings
+    // until their enclosing result or argv guard is dropped.
+    let value = unsafe { CStr::from_ptr(pointer) };
+    if value.to_bytes().is_empty() {
+        return Err(invalid_native_output(field, "path is empty"));
+    }
+    Ok(PathBuf::from(c_os_string_from_cstr(value, field)?))
+}
+
+fn c_os_string_to_owned(pointer: *const c_char, field: &'static str) -> Result<OsString, Error> {
+    if pointer.is_null() {
+        return Err(invalid_native_output(field, "string pointer is null"));
+    }
+    // SAFETY: callers validate native ownership and keep the allocation live.
+    c_os_string_from_cstr(unsafe { CStr::from_ptr(pointer) }, field)
+}
+
+#[cfg(unix)]
+fn c_os_string_from_cstr(value: &CStr, _: &'static str) -> Result<OsString, Error> {
+    use std::os::unix::ffi::OsStringExt;
+
+    Ok(OsString::from_vec(value.to_bytes().to_vec()))
+}
+
+#[cfg(not(unix))]
+fn c_os_string_from_cstr(value: &CStr, field: &'static str) -> Result<OsString, Error> {
+    value
+        .to_str()
+        .map(OsString::from)
         .map_err(|_| Error::InvalidUtf8 { field })
 }
 
@@ -1296,6 +2318,20 @@ impl<T> Drop for NativeResultGuard<T> {
     }
 }
 
+struct NativeVideoMuxArgvGuard {
+    argv: *mut *mut c_char,
+    argc: i32,
+    free: unsafe extern "C" fn(*mut *mut c_char, i32),
+}
+
+impl Drop for NativeVideoMuxArgvGuard {
+    fn drop(&mut self) {
+        // SAFETY: this guard is armed only after VLLM_OK and owns the matching
+        // pointer/count pair until it invokes the native free exactly once.
+        unsafe { (self.free)(self.argv, self.argc) };
+    }
+}
+
 struct NativeStringGuard(NonNull<c_char>);
 
 impl Drop for NativeStringGuard {
@@ -1308,20 +2344,25 @@ impl Drop for NativeStringGuard {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::ffi::CStr;
+    use std::ffi::{CStr, CString, OsString};
     use std::mem::{align_of, size_of};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::ptr::{self, NonNull};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     use vllm_cpp_sys as ffi;
 
     use super::{
-        checked_product, complete_tokens_with, embed_with, embedding_from_raw, load_engine_with,
+        checked_product, complete_tokens_with, compose_video_mux_argv_with, embed_with,
+        embedding_from_raw, generate_video_with, load_engine_with, load_video_engine_with,
         token_completion_from_raw, transcribe_with, transcription_from_raw,
-        validate_embedding_count, validate_pcm_input, validate_token_input, Device, EmbeddingTask,
-        MarshaledEmbeddingInput, MarshaledModelParams, MarshaledTranscriptionInput, ModelConfig,
-        SchedulerPolicy, TextTask, Toggle, TranscriptionInput, TranscriptionTask,
+        validate_embedding_count, validate_pcm_input, validate_pointer_count, validate_token_input,
+        video_mux_argv_from_raw, Device, EmbeddingTask, MarshaledEmbeddingInput,
+        MarshaledModelParams, MarshaledTranscriptionInput, MarshaledVideoGenerationParams,
+        MarshaledVideoModelParams, ModelConfig, SchedulerPolicy, TextTask, Toggle,
+        TranscriptionInput, TranscriptionTask, VideoDevice, VideoEngine, VideoGenerationParams,
+        VideoModelConfig, VideoMuxParams, VideoPartition,
     };
     use crate::abi::Compatibility;
     use crate::Error;
@@ -1524,6 +2565,7 @@ mod tests {
         assert!(matches!(result, Err(Error::ModelLoad { .. })));
     }
 
+    static FREE_COUNTER_LOCK: Mutex<()> = Mutex::new(());
     static COMPLETION_FREES: AtomicUsize = AtomicUsize::new(0);
     static TRANSCRIPTION_FREES: AtomicUsize = AtomicUsize::new(0);
     static EMBEDDING_FREES: AtomicUsize = AtomicUsize::new(0);
@@ -1577,6 +2619,9 @@ mod tests {
 
     #[test]
     fn token_zero_capacity_uses_null_and_hidden_completion_metadata() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         COMPLETION_FREES.store(0, Ordering::SeqCst);
         let text = b"generated\0";
         let params = zeroed_sampling_params();
@@ -1610,6 +2655,9 @@ mod tests {
 
     #[test]
     fn token_completion_copies_truncated_ids_and_optional_completion() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         COMPLETION_FREES.store(0, Ordering::SeqCst);
         let text = b"ok\0";
         let finish = b"length\0";
@@ -1667,6 +2715,9 @@ mod tests {
 
     #[test]
     fn token_native_failure_discards_partial_output_without_arming_guard() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         COMPLETION_FREES.store(0, Ordering::SeqCst);
         let params = zeroed_sampling_params();
         let result = complete_tokens_with(
@@ -1691,6 +2742,9 @@ mod tests {
 
     #[test]
     fn token_conversion_error_still_frees_once() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         COMPLETION_FREES.store(0, Ordering::SeqCst);
         let invalid_utf8 = [0xff_u8, 0];
         let params = zeroed_sampling_params();
@@ -1840,6 +2894,9 @@ mod tests {
 
     #[test]
     fn transcription_copies_outputs_and_frees_once_on_conversion_error() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         TRANSCRIPTION_FREES.store(0, Ordering::SeqCst);
         let samples = [0.0];
         let input = MarshaledTranscriptionInput::new_with(
@@ -1981,6 +3038,9 @@ mod tests {
 
     #[test]
     fn embedding_rows_preserve_order_own_values_and_free_once() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         EMBEDDING_FREES.store(0, Ordering::SeqCst);
         let input = MarshaledEmbeddingInput::new(["a", "b"]).expect("embedding input");
         let mut native_values = vec![1.0, 2.0, 3.0, 4.0];
@@ -2020,6 +3080,9 @@ mod tests {
 
     #[test]
     fn embedding_conversion_error_frees_once() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         EMBEDDING_FREES.store(0, Ordering::SeqCst);
         let input = MarshaledEmbeddingInput::new(["a"]).expect("embedding input");
         let result = embed_with(
@@ -2040,5 +3103,583 @@ mod tests {
         );
         assert!(matches!(result, Err(Error::InvalidNativeOutput { .. })));
         assert_eq!(EMBEDDING_FREES.load(Ordering::SeqCst), 1);
+    }
+
+    fn video_model_defaults() -> ffi::vllm_video_model_params {
+        let pointer = NATIVE_STRING.as_ptr().cast();
+        ffi::vllm_video_model_params {
+            dit_path: pointer,
+            encoder_path: pointer,
+            tokenizer_path: pointer,
+            video_vae_path: pointer,
+            video_vae_config_path: pointer,
+            audio_vae_path: pointer,
+            audio_vae_config_path: pointer,
+            prompt_embeds_path: pointer,
+            partition: pointer,
+            device: 41,
+            dequant_bf16: 42,
+            fp4_resident: 43,
+        }
+    }
+
+    fn required_video_config() -> VideoModelConfig {
+        let mut config = VideoModelConfig::new("dit.gguf");
+        config.video_vae_path = Some(PathBuf::from("video.safetensors"));
+        config.audio_vae_path = Some(PathBuf::from("audio.safetensors"));
+        config
+    }
+
+    fn video_generation_defaults() -> ffi::vllm_video_params {
+        let pointer = NATIVE_STRING.as_ptr().cast();
+        ffi::vllm_video_params {
+            prompt: pointer,
+            width: 31,
+            height: 32,
+            num_frames: 33,
+            steps: 34,
+            seed: 35,
+            has_seed: 36,
+            first_frame: pointer,
+            last_frame: pointer,
+            ref_image: pointer,
+            ref_video: pointer,
+            ref_audio: pointer,
+            noise_aug: 37.0,
+            output_dir: pointer,
+        }
+    }
+
+    fn zeroed_video_mux_defaults() -> ffi::vllm_video_mux_params {
+        ffi::vllm_video_mux_params {
+            frames: ptr::null(),
+            audio_path: ptr::null(),
+            output_path: ptr::null(),
+            fps: 0,
+            crf: 0,
+        }
+    }
+
+    #[test]
+    fn video_device_partition_and_model_defaults_are_exact() {
+        assert_eq!(VideoDevice::Cpu.as_native(), 0);
+        assert_eq!(VideoDevice::Cuda.as_native(), 1);
+        assert_eq!(VideoPartition::Fl2va.as_str(), "fl2va");
+        assert_eq!(VideoPartition::Ref2va.as_str(), "ref2va");
+
+        let defaults = video_model_defaults();
+        let mut params = MarshaledVideoModelParams::new(required_video_config())
+            .expect("marshal required video paths");
+        params.apply_defaults(defaults);
+        let raw = params.raw();
+        assert_eq!(c_string(raw.dit_path), "dit.gguf");
+        assert_eq!(c_string(raw.video_vae_path), "video.safetensors");
+        assert_eq!(c_string(raw.audio_vae_path), "audio.safetensors");
+        assert_eq!(raw.encoder_path, defaults.encoder_path);
+        assert_eq!(raw.partition, defaults.partition);
+        assert_eq!(raw.device, defaults.device);
+        assert_eq!(raw.dequant_bf16, defaults.dequant_bf16);
+        assert_eq!(raw.fp4_resident, defaults.fp4_resident);
+
+        let mut config = required_video_config();
+        config.encoder_path = Some(PathBuf::from("encoder.gguf"));
+        config.tokenizer_path = Some(PathBuf::from("tokenizer.json"));
+        config.video_vae_config_path = Some(PathBuf::from("video.json"));
+        config.audio_vae_config_path = Some(PathBuf::from("audio.json"));
+        config.prompt_embeds_path = Some(PathBuf::from("prompt.f32"));
+        config.partition = Some(VideoPartition::Ref2va);
+        config.device = Some(VideoDevice::Cuda);
+        config.dequant_bf16 = Some(true);
+        config.fp4_resident = Some(false);
+        let mut params = MarshaledVideoModelParams::new(config).expect("marshal all video paths");
+        params.apply_defaults(defaults);
+        let raw = params.raw();
+        assert_eq!(c_string(raw.encoder_path), "encoder.gguf");
+        assert_eq!(c_string(raw.tokenizer_path), "tokenizer.json");
+        assert_eq!(c_string(raw.video_vae_config_path), "video.json");
+        assert_eq!(c_string(raw.audio_vae_config_path), "audio.json");
+        assert_eq!(c_string(raw.prompt_embeds_path), "prompt.f32");
+        assert_eq!(c_string(raw.partition), "ref2va");
+        assert_eq!(raw.device, 1);
+        assert_eq!(raw.dequant_bf16, 1);
+        assert_eq!(raw.fp4_resident, 0);
+    }
+
+    #[test]
+    fn video_model_validation_precedes_abi_and_load_order_is_exact() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let calls = RefCell::new(Vec::new());
+        let mut empty_optional = required_video_config();
+        empty_optional.encoder_path = Some(PathBuf::new());
+        let error = load_video_engine_with(
+            empty_optional,
+            || {
+                calls.borrow_mut().push("abi");
+                matching_compatibility()
+            },
+            |_| unreachable!("default after Rust validation"),
+            |_, _| unreachable!("load after Rust validation"),
+            |_| Ok(()),
+            count_video_engine_free,
+        )
+        .err()
+        .expect("empty optional path");
+        assert!(matches!(error, Error::InvalidConfiguration { .. }));
+        assert!(calls.borrow().is_empty());
+
+        let loaded = load_video_engine_with(
+            required_video_config(),
+            || {
+                calls.borrow_mut().push("abi");
+                matching_compatibility()
+            },
+            |_| {
+                calls.borrow_mut().push("default");
+                video_model_defaults()
+            },
+            |raw, output| {
+                calls.borrow_mut().push("load");
+                assert_eq!(c_string(raw.dit_path), "dit.gguf");
+                // SAFETY: output is writable caller storage.
+                unsafe { output.write(NonNull::<ffi::vllm_video_engine>::dangling().as_ptr()) };
+                ffi::vllm_status_VLLM_OK
+            },
+            |_| Ok(()),
+            count_video_engine_free,
+        )
+        .expect("injected video load");
+        assert_eq!(*calls.borrow(), ["abi", "default", "load"]);
+        VIDEO_ENGINE_FREES.store(0, Ordering::SeqCst);
+        VIDEO_LOAD_ORDER.store(1, Ordering::SeqCst);
+        drop(VideoEngine::from(loaded));
+        assert_eq!(VIDEO_ENGINE_FREES.load(Ordering::SeqCst), 1);
+    }
+
+    static VIDEO_ENGINE_FREES: AtomicUsize = AtomicUsize::new(0);
+    static VIDEO_RESULT_FREES: AtomicUsize = AtomicUsize::new(0);
+    static VIDEO_MUX_FREES: AtomicUsize = AtomicUsize::new(0);
+    static VIDEO_LOAD_ORDER: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn count_video_engine_free(_: *mut ffi::vllm_video_engine) {
+        assert_eq!(VIDEO_LOAD_ORDER.swap(2, Ordering::SeqCst), 1);
+        VIDEO_ENGINE_FREES.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn count_video_result_free(_: *mut ffi::vllm_video_result) {
+        VIDEO_RESULT_FREES.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C" fn count_video_mux_free(_: *mut *mut std::os::raw::c_char, argc: i32) {
+        assert!(argc > 0);
+        VIDEO_MUX_FREES.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn video_load_null_failure_cleanup_and_owner_drop_are_safe() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        VIDEO_ENGINE_FREES.store(0, Ordering::SeqCst);
+        let error = load_video_engine_with(
+            required_video_config(),
+            matching_compatibility,
+            |_| video_model_defaults(),
+            |_, _| ffi::vllm_status_VLLM_OK,
+            |_| Ok(()),
+            count_video_engine_free,
+        )
+        .err()
+        .expect("OK plus null handle");
+        assert!(matches!(error, Error::InvalidNativeOutput { .. }));
+        assert_eq!(VIDEO_ENGINE_FREES.load(Ordering::SeqCst), 0);
+
+        VIDEO_LOAD_ORDER.store(0, Ordering::SeqCst);
+        let error = load_video_engine_with(
+            required_video_config(),
+            matching_compatibility,
+            |_| video_model_defaults(),
+            |_, output| {
+                // SAFETY: output is writable caller storage.
+                unsafe { output.write(NonNull::<ffi::vllm_video_engine>::dangling().as_ptr()) };
+                ffi::vllm_status_VLLM_ERR_MODEL_LOAD
+            },
+            |_| {
+                assert_eq!(VIDEO_LOAD_ORDER.swap(1, Ordering::SeqCst), 0);
+                Err(Error::ModelLoad {
+                    message: "copied before free".to_owned(),
+                })
+            },
+            count_video_engine_free,
+        )
+        .err()
+        .expect("injected load failure");
+        assert_eq!(
+            error,
+            Error::ModelLoad {
+                message: "copied before free".to_owned()
+            }
+        );
+        assert_eq!(VIDEO_LOAD_ORDER.load(Ordering::SeqCst), 2);
+        assert_eq!(VIDEO_ENGINE_FREES.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn video_generation_validation_and_defaults_are_exact() {
+        let defaults = video_generation_defaults();
+        let base = VideoGenerationParams::new("", "out");
+        let mut marshaled = MarshaledVideoGenerationParams::new(&base).expect("default generation");
+        marshaled.apply_defaults(defaults);
+        let raw = marshaled.raw();
+        assert_eq!(c_string(raw.prompt), "");
+        assert_eq!(c_string(raw.output_dir), "out");
+        assert_eq!(raw.width, defaults.width);
+        assert_eq!(raw.height, defaults.height);
+        assert_eq!(raw.num_frames, defaults.num_frames);
+        assert_eq!(raw.steps, defaults.steps);
+        assert_eq!(raw.seed, defaults.seed);
+        assert_eq!(raw.has_seed, defaults.has_seed);
+        assert_eq!(raw.noise_aug, defaults.noise_aug);
+
+        let explicit = VideoGenerationParams::new("prompt", "out")
+            .dimensions(64, 33)
+            .num_frames(2)
+            .steps(1)
+            .seed(0)
+            .first_frame("first.ppm")
+            .last_frame("last.ppm")
+            .noise_augmentation(0.5);
+        let mut marshaled =
+            MarshaledVideoGenerationParams::new(&explicit).expect("explicit generation");
+        marshaled.apply_defaults(defaults);
+        let raw = marshaled.raw();
+        assert_eq!((raw.width, raw.height), (64, 33));
+        assert_eq!(raw.num_frames, 2);
+        assert_eq!(raw.steps, 1);
+        assert_eq!(raw.seed, 0);
+        assert_eq!(raw.has_seed, 1);
+        assert_eq!(raw.noise_aug, 0.5);
+        assert_eq!(c_string(raw.first_frame), "first.ppm");
+        assert_eq!(c_string(raw.last_frame), "last.ppm");
+
+        let invalid = [
+            VideoGenerationParams::new("", ""),
+            VideoGenerationParams::new("", "out").dimensions(0, 1),
+            VideoGenerationParams::new("", "out").num_frames(1),
+            VideoGenerationParams::new("", "out").steps(0),
+            VideoGenerationParams::new("", "out").noise_augmentation(f32::NAN),
+            VideoGenerationParams::new("", "out").noise_augmentation(0.0),
+            VideoGenerationParams::new("", "out")
+                .first_frame("first.ppm")
+                .reference_audio("ref.wav"),
+            VideoGenerationParams::new("", "out")
+                .reference_image("ref.ppm")
+                .reference_video("frames"),
+            VideoGenerationParams::new("", "x".repeat(482)),
+            VideoGenerationParams::new("", "out").reference_video("x".repeat(482)),
+        ];
+        for params in invalid {
+            assert!(matches!(
+                params.validate(),
+                Err(Error::InvalidConfiguration { .. })
+            ));
+        }
+        VideoGenerationParams::new("", "x".repeat(481))
+            .reference_video("y".repeat(481))
+            .validate()
+            .expect("481-byte video frame paths are accepted");
+        for params in [
+            VideoGenerationParams::new("", "out").first_frame("first.ppm"),
+            VideoGenerationParams::new("", "out").reference_image("ref.ppm"),
+            VideoGenerationParams::new("", "out")
+                .reference_image("ref.ppm")
+                .reference_audio("ref.wav"),
+            VideoGenerationParams::new("", "out")
+                .reference_video("frames")
+                .reference_audio("ref.wav"),
+            VideoGenerationParams::new("", "out").reference_audio("ref.wav"),
+        ] {
+            params.validate().expect("allowed reference combination");
+        }
+    }
+
+    fn valid_video_output<'a>(
+        frame_dir: &'a CString,
+        audio_path: &'a CString,
+        argv: &'a mut Vec<*mut std::os::raw::c_char>,
+    ) -> ffi::vllm_video_result {
+        ffi::vllm_video_result {
+            frame_dir: frame_dir.as_ptr().cast_mut(),
+            audio_path: audio_path.as_ptr().cast_mut(),
+            frame_count: 8,
+            width: 32,
+            height: 32,
+            fps: 24,
+            sample_rate: 32_000,
+            mux_argv: argv.as_mut_ptr(),
+            mux_argc: i32::try_from(argv.len() - 1).unwrap(),
+        }
+    }
+
+    #[test]
+    fn video_generation_result_owns_data_and_frees_once() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        VIDEO_RESULT_FREES.store(0, Ordering::SeqCst);
+        let frame_dir = CString::new("frames").unwrap();
+        let audio_path = CString::new("frames/audio.wav").unwrap();
+        let arg0 = CString::new("ffmpeg").unwrap();
+        let arg1 = CString::new("-y").unwrap();
+        let mut pointers = vec![
+            arg0.as_ptr().cast_mut(),
+            arg1.as_ptr().cast_mut(),
+            ptr::null_mut(),
+        ];
+        let raw = valid_video_output(&frame_dir, &audio_path, &mut pointers);
+        let params = video_generation_defaults();
+        let result = generate_video_with(
+            &params,
+            |_, output| {
+                // SAFETY: output is writable caller storage.
+                unsafe { output.write(raw) };
+                ffi::vllm_status_VLLM_OK
+            },
+            count_video_result_free,
+        )
+        .expect("owned video result");
+        assert_eq!(result.frame_dir(), Path::new("frames"));
+        assert_eq!(result.audio_path(), Path::new("frames/audio.wav"));
+        assert_eq!(result.frame_count(), 8);
+        assert_eq!(result.width(), 32);
+        assert_eq!(result.height(), 32);
+        assert_eq!(result.fps(), 24);
+        assert_eq!(result.sample_rate(), 32_000);
+        assert_eq!(
+            result.mux_argv().args(),
+            [OsString::from("ffmpeg"), OsString::from("-y")]
+        );
+        assert_eq!(VIDEO_RESULT_FREES.load(Ordering::SeqCst), 1);
+
+        VIDEO_RESULT_FREES.store(0, Ordering::SeqCst);
+        let result = generate_video_with(
+            &params,
+            |_, _| ffi::vllm_status_VLLM_ERR_RUNTIME,
+            count_video_result_free,
+        );
+        assert!(matches!(result, Err(Error::Runtime { .. })));
+        assert_eq!(VIDEO_RESULT_FREES.load(Ordering::SeqCst), 0);
+
+        let assert_conversion_error = |malformed| {
+            VIDEO_RESULT_FREES.store(0, Ordering::SeqCst);
+            let result = generate_video_with(
+                &params,
+                |_, output| {
+                    // SAFETY: output is writable caller storage.
+                    unsafe { output.write(malformed) };
+                    ffi::vllm_status_VLLM_OK
+                },
+                count_video_result_free,
+            );
+            assert!(matches!(result, Err(Error::InvalidNativeOutput { .. })));
+            assert_eq!(VIDEO_RESULT_FREES.load(Ordering::SeqCst), 1);
+        };
+
+        for malformed in [
+            ffi::vllm_video_result {
+                frame_count: 0,
+                ..raw
+            },
+            ffi::vllm_video_result { width: 0, ..raw },
+            ffi::vllm_video_result { height: 0, ..raw },
+            ffi::vllm_video_result { fps: 0, ..raw },
+            ffi::vllm_video_result {
+                sample_rate: 0,
+                ..raw
+            },
+            ffi::vllm_video_result {
+                frame_dir: ptr::null_mut(),
+                ..raw
+            },
+            ffi::vllm_video_result {
+                audio_path: ptr::null_mut(),
+                ..raw
+            },
+            ffi::vllm_video_result {
+                mux_argv: ptr::null_mut(),
+                ..raw
+            },
+            ffi::vllm_video_result {
+                mux_argc: -1,
+                ..raw
+            },
+            ffi::vllm_video_result { mux_argc: 0, ..raw },
+        ] {
+            assert_conversion_error(malformed);
+        }
+
+        let empty = CString::new("").unwrap();
+        assert_conversion_error(ffi::vllm_video_result {
+            frame_dir: empty.as_ptr().cast_mut(),
+            ..raw
+        });
+        assert_conversion_error(ffi::vllm_video_result {
+            audio_path: empty.as_ptr().cast_mut(),
+            ..raw
+        });
+
+        let mut null_entry = vec![arg0.as_ptr().cast_mut(), ptr::null_mut(), ptr::null_mut()];
+        assert_conversion_error(ffi::vllm_video_result {
+            mux_argv: null_entry.as_mut_ptr(),
+            mux_argc: 2,
+            ..raw
+        });
+        let mut bad_terminator = vec![arg0.as_ptr().cast_mut(), arg1.as_ptr().cast_mut()];
+        assert_conversion_error(ffi::vllm_video_result {
+            mux_argv: bad_terminator.as_mut_ptr(),
+            mux_argc: 1,
+            ..raw
+        });
+    }
+
+    #[test]
+    fn video_argv_metadata_is_rejected_before_dereference() {
+        assert!(video_mux_argv_from_raw(ptr::null_mut(), -1, "argv").is_err());
+        assert!(video_mux_argv_from_raw(ptr::null_mut(), 0, "argv").is_err());
+        assert!(video_mux_argv_from_raw(ptr::null_mut(), 1, "argv").is_err());
+        assert!(video_mux_argv_from_raw(ptr::dangling_mut::<u8>().cast(), 1, "argv").is_err());
+        let aligned_top = usize::MAX & !(align_of::<*mut std::os::raw::c_char>() - 1);
+        assert!(video_mux_argv_from_raw(aligned_top as *mut *mut _, 1, "argv").is_err());
+        assert!(validate_pointer_count::<*mut std::os::raw::c_char>(
+            NonNull::dangling().as_ptr(),
+            isize::MAX as usize / size_of::<*mut std::os::raw::c_char>() + 1,
+            "argv"
+        )
+        .is_err());
+
+        let arg = CString::new("ffmpeg").unwrap();
+        let mut null_entry = vec![ptr::null_mut(), ptr::null_mut()];
+        assert!(video_mux_argv_from_raw(null_entry.as_mut_ptr(), 1, "argv").is_err());
+        let mut bad_terminator = vec![arg.as_ptr().cast_mut(), arg.as_ptr().cast_mut()];
+        assert!(video_mux_argv_from_raw(bad_terminator.as_mut_ptr(), 1, "argv").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn video_outputs_preserve_non_utf8_unix_bytes() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let frame_dir = CString::new(vec![b'f', 0xff]).unwrap();
+        let audio_path = CString::new(vec![b'a', 0xfe]).unwrap();
+        let arg = CString::new(vec![b'x', 0xfd]).unwrap();
+        let mut pointers = vec![arg.as_ptr().cast_mut(), ptr::null_mut()];
+        let raw = valid_video_output(&frame_dir, &audio_path, &mut pointers);
+        let result = super::video_result_from_raw(&raw).expect("non-UTF-8 video output");
+        assert_eq!(result.frame_dir().as_os_str().as_bytes(), [b'f', 0xff]);
+        assert_eq!(result.audio_path().as_os_str().as_bytes(), [b'a', 0xfe]);
+        assert_eq!(
+            result.mux_argv().args(),
+            [OsString::from_vec(vec![b'x', 0xfd])]
+        );
+    }
+
+    #[test]
+    fn injected_mux_preserves_defaults_order_and_frees_once() {
+        let _guard = FREE_COUNTER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        VIDEO_MUX_FREES.store(0, Ordering::SeqCst);
+        let calls = RefCell::new(Vec::new());
+        let arg0 = CString::new("ffmpeg").unwrap();
+        let arg1 = CString::new("path with spaces;$HOME").unwrap();
+        let mut pointers = vec![
+            arg0.as_ptr().cast_mut(),
+            arg1.as_ptr().cast_mut(),
+            ptr::null_mut(),
+        ];
+        let params = VideoMuxParams::new("frames_%06d.ppm", "out.mp4");
+        let result = compose_video_mux_argv_with(
+            &params,
+            || {
+                calls.borrow_mut().push("abi");
+                matching_compatibility()
+            },
+            |_| {
+                calls.borrow_mut().push("default");
+                zeroed_video_mux_defaults()
+            },
+            |raw, output, count| {
+                calls.borrow_mut().push("call");
+                // SAFETY: compose_video_mux_argv_with passes a live marshaled
+                // parameter struct for the duration of this closure.
+                let raw = unsafe { &*raw };
+                assert_eq!(c_string(raw.frames), "frames_%06d.ppm");
+                assert_eq!(c_string(raw.output_path), "out.mp4");
+                assert!(raw.audio_path.is_null());
+                assert_eq!(raw.fps, 0);
+                assert_eq!(raw.crf, 0);
+                // SAFETY: outputs are writable caller storage and pointers live
+                // until the injected guard frees them.
+                unsafe {
+                    output.write(pointers.as_mut_ptr());
+                    count.write(2);
+                }
+                ffi::vllm_status_VLLM_OK
+            },
+            count_video_mux_free,
+        )
+        .expect("injected mux composition");
+        assert_eq!(*calls.borrow(), ["abi", "default", "call"]);
+        assert_eq!(
+            result.args(),
+            [
+                OsString::from("ffmpeg"),
+                OsString::from("path with spaces;$HOME")
+            ]
+        );
+        assert_eq!(VIDEO_MUX_FREES.load(Ordering::SeqCst), 1);
+
+        VIDEO_MUX_FREES.store(0, Ordering::SeqCst);
+        let error = compose_video_mux_argv_with(
+            &VideoMuxParams::new("", "out.mp4"),
+            || panic!("ABI after Rust validation"),
+            |_| unreachable!(),
+            |_, _, _| unreachable!(),
+            count_video_mux_free,
+        )
+        .expect_err("empty frame pattern");
+        assert!(matches!(error, Error::InvalidConfiguration { .. }));
+        assert_eq!(VIDEO_MUX_FREES.load(Ordering::SeqCst), 0);
+
+        let error = compose_video_mux_argv_with(
+            &params,
+            matching_compatibility,
+            |_| zeroed_video_mux_defaults(),
+            |_, _, _| ffi::vllm_status_VLLM_ERR_RUNTIME,
+            count_video_mux_free,
+        )
+        .expect_err("mux native failure");
+        assert!(matches!(error, Error::Runtime { .. }));
+        assert_eq!(VIDEO_MUX_FREES.load(Ordering::SeqCst), 0);
+
+        let mut bad = vec![arg0.as_ptr().cast_mut(), arg1.as_ptr().cast_mut()];
+        let error = compose_video_mux_argv_with(
+            &params,
+            matching_compatibility,
+            |_| zeroed_video_mux_defaults(),
+            |_, output, count| {
+                // SAFETY: outputs are writable caller storage.
+                unsafe {
+                    output.write(bad.as_mut_ptr());
+                    count.write(1);
+                }
+                ffi::vllm_status_VLLM_OK
+            },
+            count_video_mux_free,
+        )
+        .expect_err("non-null mux terminator");
+        assert!(matches!(error, Error::InvalidNativeOutput { .. }));
+        assert_eq!(VIDEO_MUX_FREES.load(Ordering::SeqCst), 1);
     }
 }

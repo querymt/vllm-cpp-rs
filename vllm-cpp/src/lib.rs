@@ -5,12 +5,14 @@
 //! Resolve a Hub model with [`HuggingFaceModel`] (default `main`, or an explicit
 //! revision), then create a text [`Engine`] with [`Engine::load`] or configure
 //! native model settings through [`EngineBuilder`]. [`TranscriptionEngine`] and
-//! [`EmbeddingEngine`] provide blocking task-specific operations. [`SamplingParams`]
-//! owns sampling, stop-string, [`StructuredOutput`] settings, and an optional
-//! host-side logits processor for completion calls. The text engine provides
-//! blocking text and pre-tokenized completion, streaming, raw-JSON chat, and
-//! [`Engine::submit`] for a concurrent [`Request`]. Enable `serde` for
-//! `serde_json::Value` chat helpers.
+//! [`EmbeddingEngine`] provide blocking task-specific operations. A separate
+//! [`VideoEngine`] loads MiniMax-H3 checkpoint sets and performs exclusive,
+//! blocking generation; [`compose_video_mux_argv`] composes owned ffmpeg argument
+//! boundaries without executing a process. [`SamplingParams`] owns sampling,
+//! stop-string, [`StructuredOutput`] settings, and an optional host-side logits
+//! processor for completion calls. The text engine provides blocking text and
+//! pre-tokenized completion, streaming, raw-JSON chat, and [`Engine::submit`] for
+//! a concurrent [`Request`]. Enable `serde` for `serde_json::Value` chat helpers.
 //!
 //! # Ownership and callbacks
 //!
@@ -26,15 +28,37 @@
 //!
 //! A [`Request`] retains its engine and asynchronous callback until native
 //! free/join completes. Requests are `Send` but intentionally not `Sync`. The text
-//! [`Engine`] is `Send + Sync`; transcription and embedding owners are
+//! [`Engine`] is `Send + Sync`; transcription, embedding, and video owners are
 //! conservatively neither, must remain on their creating thread, and require
-//! exclusive access for operations. Native embedding execution is serialized.
+//! exclusive access for operations. [`VideoEngine`] is also non-cloneable.
+//! Native embedding and per-video-handle generation are serialized.
 //! Asynchronous callbacks run on a native delivery thread, must be `Send + 'static`, and surface panic through
 //! [`Error::CallbackPanicked`]. ABI version 17 forbids waiting for or freeing a
 //! request from its callback thread; callback-thread drop delegates ownership to
 //! a cleanup reaper instead. ABI 17 exposes no task-introspection API, so loading
 //! cannot prove or infer a checkpoint's task. Native task selection and future
-//! wrong-task diagnostics remain authoritative.
+//! wrong-task diagnostics remain authoritative. Video model format, partition,
+//! checkpoint capability, and reference-media checks are likewise native
+//! authority; Rust performs only structural validation.
+//!
+//! # Video filesystem and process policy
+//!
+//! Video generation is blocking, compute-, memory-, and disk-intensive. It has no
+//! cancellation, timeout, quota, resource limit, or sandbox. Native code creates
+//! the output directory and parents after computation, writes or truncates
+//! `frame_%06d.ppm` and `audio.wav`, leaves stale extra files, and may leave partial
+//! artifacts on failure. Rust does not create, delete, roll back, canonicalize,
+//! confine, or reject symlinked paths. Callers must trust paths, provision
+//! resources, and clean outputs. Unix output paths and argv entries preserve
+//! non-UTF-8 bytes without lossy conversion.
+//!
+//! Generation returns owned argv for `<output_dir>/video.mp4` but does not create
+//! that MP4. Mux composition performs no filesystem I/O, does not locate ffmpeg,
+//! and never executes it. Arguments must be passed as separate boundaries rather
+//! than shell-joined. The first argument is `ffmpeg`, which requests `PATH` lookup
+//! unless the caller substitutes a trusted absolute binary, and native includes
+//! `-y`, so caller execution may overwrite the output. Any execution, sandboxing,
+//! cancellation, resource policy, and path trust remain entirely caller-owned.
 //!
 //! # ABI, linking, and deployment
 //!
@@ -65,8 +89,10 @@ mod request;
 
 pub use callback::{StreamControl, StreamEvent, StreamOutcome};
 pub use engine::{
-    Completion, EmbeddingEngine, EmbeddingResult, Engine, EngineBuilder, FinishReason,
-    TokenCompletion, Transcription, TranscriptionEngine, TranscriptionInput,
+    compose_video_mux_argv, Completion, EmbeddingEngine, EmbeddingResult, Engine, EngineBuilder,
+    FinishReason, TokenCompletion, Transcription, TranscriptionEngine, TranscriptionInput,
+    VideoDevice, VideoEngine, VideoEngineBuilder, VideoGenerationParams, VideoMuxArgv,
+    VideoMuxParams, VideoPartition, VideoResult,
 };
 pub use error::{Error, HuggingFaceError};
 pub use hf::HuggingFaceModel;
