@@ -1,6 +1,6 @@
 # examples
 
-five examples exercise the safe `vllm-cpp` api: four use fixed prompts and settings, and `chat` is an interactive command-line application. one additional maintainer utility prepares the pinned test fixture:
+five intentionally text-focused examples exercise the safe `vllm-cpp` api: four use fixed prompts and settings, and `chat` is an interactive command-line application. one additional maintainer utility prepares the optional pinned text fixture:
 
 | example | behavior |
 |---|---|
@@ -10,6 +10,19 @@ five examples exercise the safe `vllm-cpp` api: four use fixed prompts and setti
 | [`chat`](chat.rs) | runs a Clap-based interactive chat with conversation history and streaming output |
 | [`structured`](structured.rs) | extracts a fixed weather report under a JSON Schema |
 | [`setup_test_model`](setup_test_model.rs) | resolves the pinned Qwen test fixture for `just setup-test-model`; not a general inference CLI |
+
+The library also supports pre-tokenized completion without adding another binary:
+
+```rust,no_run
+use vllm_cpp::{Engine, SamplingParams};
+
+let engine = Engine::load("/path/to/model")?;
+let result = engine.complete_tokens(&[1, 2, 3], &SamplingParams::greedy(), 32, true)?;
+println!("{:?} truncated={}", result.token_ids, result.truncated);
+# Ok::<(), vllm_cpp::Error>(())
+```
+
+`max_output_tokens` limits copied IDs, not native generation; truncation is determined from native completion metadata. Transcription, embedding, and video need task-specific checkpoints, media, and substantial resources, so their rustdoc/API documentation is authoritative rather than unvalidated runnable examples. Mux composition returns argument boundaries only and never executes ffmpeg.
 
 The four fixed examples (`complete`, `stream`, `concurrent`, and `structured`) accept the same manual model-source forms:
 
@@ -91,7 +104,7 @@ CMAKE_GENERATOR=Ninja cargo run --locked --release -p vllm-cpp --example chat --
 
 `--prompt/-p <text>` and `--file/-f <path>` are mutually exclusive optional first user messages; prompt files must be UTF-8. `--system <text>` adds a retained system message. Generation options are `--max-tokens` (default `256`, maximum `2147483647`), `--temperature` (default `0.7`), `--top-p` (default `1`), `--top-k` (default `0`), `--min-p` (default `0`), and optional `--seed`. Responses stream by default; `--no-stream` selects blocking `Engine::chat_json` output. The CLI maintains the complete user/assistant history, submits it on each turn, and prints only assistant content rather than raw response JSON. Native role, reasoning, tool-call, and finish metadata is ignored; a valid response with no content is stored as an empty assistant message.
 
-At `user>` enter `/clear` to retain the system message while clearing other history, or `/quit`/`/exit` to stop. EOF also exits cleanly. A per-turn request or response error is reported as `chat: <error>`, the attempted turn is removed from history, and the prompt continues; terminal input/output errors and model startup failures still exit. This high-level example intentionally exposes only controls supported by the existing chat request and engine APIs; it does not add low-level model, device, context, batch, token, or timing controls from other runtimes.
+At `user>` enter `/clear` to retain the system message while clearing other history, or `/quit`/`/exit` to stop. EOF also exits cleanly. A per-turn request or response error is reported as `chat: <error>`, the attempted turn is removed from history, and the prompt continues; terminal input/output errors and model startup failures still exit. This high-level example intentionally exposes a small chat-oriented subset. The library provides device, memory, pre-tokenized completion, and additional model controls that this CLI deliberately omits; the example does not attempt to mirror every native or library option.
 
 ## optional nix shell
 
@@ -108,7 +121,7 @@ replace `complete` with another example and its arguments from the table.
 
 plain `cuda` is the baseline accelerator feature. read the root [experimental backend build details](https://github.com/querymt/vllm-cpp-rs#experimental-backend-builds) before using it: cuda is a bundled linux experimental/build-only integration surface, and successful compilation does not guarantee model inference or backend correctness. a non-nix build needs a compatible cuda toolkit and driver installation in addition to the ordinary linux prerequisites.
 
-set `VLLM_CPP_CUDA_ARCHITECTURES` to an architecture supported by this crate and the target gpu, and use a fresh `CARGO_TARGET_DIR` for the backend/link combination. for example, the tested RTX 5080 setup uses `120a`; do not use that value for unrelated hardware:
+set `VLLM_CPP_CUDA_ARCHITECTURES` to an architecture supported by this crate and the target GPU, and use a fresh `CARGO_TARGET_DIR` for the backend/link combination. The value below is only a configuration example; it is not candidate runtime evidence and must match the actual target:
 
 ```console
 arch=120a
@@ -131,7 +144,7 @@ CMAKE_GENERATOR=Ninja \
 other accelerator features have stricter limits:
 
 - `cuda-cutlass` is an optional cuda variant; follow the [exact external cutlass prerequisites and known blockers](https://github.com/querymt/vllm-cpp-rs#experimental-backend-builds) before selecting it.
-- `triton-aot` requires a target architecture with matching checked-in artifacts; `120a` is not supported by those artifacts.
+- `triton-aot` packages all six checked-in AOT trees (`80`, `86`, `89`, `90a`, `100a`, and `121a`). Runtime dispatch uses only an exact-SM tree; accepted targets without one, including `120a`, retain the portable CUDA fallback.
 - `vulkan` is currently for backend build/testing work. its model attention path is absent, so it cannot run these full-model examples.
 
 ## troubleshooting

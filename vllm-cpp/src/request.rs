@@ -27,7 +27,7 @@ pub enum RequestOutcome {
     Completed,
     /// The Rust callback returned [`StreamControl::Stop`].
     ///
-    /// ABI v10 treats this as an explicit stop even for the terminal event.
+    /// ABI 17 treats this as an explicit stop even for the terminal event.
     StoppedByCallback,
     /// Rust requested cancellation before completion was observable.
     Cancelled,
@@ -282,7 +282,7 @@ impl AsyncCallbackState {
     }
 
     fn record_delivery_thread(&self) {
-        // ABI v10 invokes user_data only from this request's single library-owned
+        // ABI 17 invokes user_data only from this request's single library-owned
         // delivery thread. Retain its ID through cleanup instead of marking only
         // an active trampoline, so every possible Rust re-entry from that thread
         // remains ineligible for synchronous wait/free.
