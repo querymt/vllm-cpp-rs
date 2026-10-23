@@ -342,7 +342,6 @@ impl EngineBuilder {
     }
 
     pub fn load(self) -> Result<Engine, Error> {
-        ensure_abi()?;
         let model_path = path_to_cstring(&self.model_path, "model path")?;
         let tokenizer_config_path = self
             .tokenizer_config_path
@@ -362,8 +361,7 @@ impl EngineBuilder {
             "KV transfer configuration",
         )?;
 
-        // ABI equality is checked before this struct-returning native call.
-        let mut raw = unsafe { ffi::vllm_model_params_default() };
+        let mut raw = checked_model_params_default()?;
         raw.model_path = model_path.as_ptr();
         raw.tokenizer_config_path = optional_pointer(tokenizer_config_path.as_ref());
         raw.block_size = optional_u32_to_i32(self.block_size, "block_size")?;
@@ -394,15 +392,30 @@ impl EngineBuilder {
     }
 }
 
-fn ensure_abi() -> Result<(), Error> {
-    // SAFETY: this base ABI function takes no pointers or versioned structs.
-    let actual = unsafe { ffi::vllm_abi_version() };
+fn checked_model_params_default() -> Result<ffi::vllm_model_params, Error> {
+    checked_model_params_default_with(
+        || {
+            // SAFETY: this base ABI function takes no pointers or versioned structs.
+            unsafe { ffi::vllm_abi_version() }
+        },
+        || {
+            // SAFETY: exact ABI equality was established immediately before this
+            // by-value return of a versioned struct.
+            unsafe { ffi::vllm_model_params_default() }
+        },
+    )
+}
+
+fn checked_model_params_default_with(
+    abi_version: impl FnOnce() -> i32,
+    model_params_default: impl FnOnce() -> ffi::vllm_model_params,
+) -> Result<ffi::vllm_model_params, Error> {
+    let actual = abi_version();
     let expected = ffi::VLLM_ABI_VERSION as i32;
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(Error::AbiMismatch { expected, actual })
+    if actual != expected {
+        return Err(Error::AbiMismatch { expected, actual });
     }
+    Ok(model_params_default())
 }
 
 fn completion_from_raw(raw: &ffi::vllm_completion) -> Result<Completion, Error> {
@@ -505,5 +518,36 @@ impl Drop for NativeStringGuard {
     fn drop(&mut self) {
         // SAFETY: vllm_chat allocated this string and this guard owns it once.
         unsafe { ffi::vllm_string_free(self.0.as_ptr()) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_model_params_default_with;
+    use crate::Error;
+    use std::cell::RefCell;
+
+    #[test]
+    fn abi_mismatch_prevents_model_params_default_call() {
+        let calls = RefCell::new(Vec::new());
+        let result = checked_model_params_default_with(
+            || {
+                calls.borrow_mut().push("abi");
+                10
+            },
+            || {
+                calls.borrow_mut().push("default");
+                unreachable!("default helper must not run after an ABI mismatch")
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(Error::AbiMismatch {
+                expected: 17,
+                actual: 10
+            })
+        ));
+        assert_eq!(*calls.borrow(), ["abi"]);
     }
 }

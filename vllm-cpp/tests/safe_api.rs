@@ -24,9 +24,11 @@ fn hugging_face_constructors_accept_default_and_explicit_revisions() {
 
 #[test]
 fn reports_expected_abi() {
-    assert_eq!(vllm_cpp::expected_abi_version(), 10);
-    assert_eq!(vllm_cpp::abi_version(), 10);
-    assert!(!vllm_cpp::version().expect("native version").is_empty());
+    assert_eq!(vllm_cpp::expected_abi_version(), 17);
+    assert_eq!(vllm_cpp::abi_version(), 17);
+    assert!(vllm_cpp::version()
+        .expect("native version")
+        .starts_with("0.0.2"));
 }
 
 #[test]

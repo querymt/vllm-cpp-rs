@@ -4,7 +4,7 @@
 
 | Component | Packaged source | Provenance | License text |
 |---|---|---|---|
-| vllm.cpp | `vllm.cpp/**` | vllm.cpp commit `34aedfbe8ed9779697905541a62e2160ccfd9c05` | `vllm.cpp/LICENSE`, `vllm.cpp/NOTICE` |
+| vllm.cpp | `vllm.cpp/**` | vllm.cpp `v0.0.2`, commit `7020de93652ca920424a10ac5255b34810dd2f24` | `vllm.cpp/LICENSE`, `vllm.cpp/NOTICE` |
 | BLAKE3 C reference | `vllm.cpp/third_party/blake3/**` | BLAKE3 1.5.5, commit `81f772a` | `vllm.cpp/third_party/blake3/LICENSE_A2`, `vllm.cpp/third_party/blake3/LICENSE_CC0` |
 | google/minja | `vllm.cpp/third_party/minja/**` | minja commit `021c229` | `vllm.cpp/third_party/minja/LICENSE` |
 | Vulkan-Headers | `vllm.cpp/third_party/vulkan/**` | Vulkan SDK 1.4.328.1, generated Khronos headers | Apache-2.0 in each generated header and `vllm.cpp/LICENSE` |
