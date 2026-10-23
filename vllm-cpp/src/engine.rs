@@ -249,6 +249,30 @@ pub struct EngineBuilder {
     config: ModelConfig,
 }
 
+/// Restricted builder for a blocking transcription engine.
+///
+/// Transcription uses native model defaults except for an optional device
+/// selection. Text-generation, memory, and scheduler controls are intentionally
+/// unavailable because the native transcription pipeline ignores them. This is
+/// an ordinary cloneable, `Send + Sync` configuration value; the loaded owner is
+/// thread-local and performs blocking operations with exclusive access.
+#[derive(Clone, Debug)]
+pub struct TranscriptionEngineBuilder {
+    config: ModelConfig,
+}
+
+/// Restricted builder for a blocking embedding engine.
+///
+/// This builder exposes only capacity, prefix-cache, device, and memory controls
+/// used by native embedding loads. Text parsers, speculative decoding, scheduler
+/// policy, KV transfer, and jump-forward settings are intentionally unavailable.
+/// This is an ordinary cloneable, `Send + Sync` configuration value; the loaded
+/// owner is thread-local and performs blocking operations with exclusive access.
+#[derive(Clone, Debug)]
+pub struct EmbeddingEngineBuilder {
+    config: ModelConfig,
+}
+
 #[derive(Clone, Debug)]
 struct ModelConfig {
     model_path: PathBuf,
@@ -1508,16 +1532,44 @@ impl EngineBuilder {
     }
 }
 
+impl TranscriptionEngineBuilder {
+    #[must_use]
+    pub fn new(model_path: impl Into<PathBuf>) -> Self {
+        Self {
+            config: ModelConfig::new(model_path),
+        }
+    }
+
+    /// Selects the required native device.
+    ///
+    /// Native transcription-only checkpoints currently reject [`Device::Cuda`]
+    /// rather than silently falling back to CPU.
+    #[must_use]
+    pub fn device(mut self, value: Device) -> Self {
+        self.config.device = Some(value);
+        self
+    }
+
+    pub fn load(self) -> Result<TranscriptionEngine, Error> {
+        Ok(TranscriptionEngine {
+            inner: load_engine::<TranscriptionTask>(self.config)?,
+        })
+    }
+}
+
 impl TranscriptionEngine {
+    /// Starts a restricted transcription engine configuration.
+    pub fn builder(model_path: impl Into<PathBuf>) -> TranscriptionEngineBuilder {
+        TranscriptionEngineBuilder::new(model_path)
+    }
+
     /// Loads a native engine owner with a transcription-only Rust method surface.
     ///
     /// ABI 17 cannot inspect the resolved task at load time. This constructor does
     /// not probe or infer checkpoint architecture; native task selection and
     /// wrong-task diagnostics remain authoritative.
     pub fn load(model_path: impl Into<PathBuf>) -> Result<Self, Error> {
-        Ok(Self {
-            inner: load_engine::<TranscriptionTask>(ModelConfig::new(model_path))?,
-        })
+        Self::builder(model_path).load()
     }
 
     /// Runs one blocking transcription and returns Rust-owned text and token IDs.
@@ -1539,16 +1591,98 @@ impl TranscriptionEngine {
     }
 }
 
+impl EmbeddingEngineBuilder {
+    #[must_use]
+    pub fn new(model_path: impl Into<PathBuf>) -> Self {
+        Self {
+            config: ModelConfig::new(model_path),
+        }
+    }
+
+    #[must_use]
+    pub fn block_size(mut self, value: u32) -> Self {
+        self.config.block_size = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn num_blocks(mut self, value: u32) -> Self {
+        self.config.num_blocks = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn max_model_len(mut self, value: u32) -> Self {
+        self.config.max_model_len = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn max_num_seqs(mut self, value: u32) -> Self {
+        self.config.max_num_seqs = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn max_num_batched_tokens(mut self, value: u32) -> Self {
+        self.config.max_num_batched_tokens = Some(value);
+        self
+    }
+
+    #[must_use]
+    pub fn prefix_caching(mut self, value: Toggle) -> Self {
+        self.config.prefix_caching = value;
+        self
+    }
+
+    /// Selects the required native device without fallback.
+    #[must_use]
+    pub fn device(mut self, value: Device) -> Self {
+        self.config.device = Some(value);
+        self
+    }
+
+    /// Sets the native fraction used by GPU memory profiling.
+    ///
+    /// The value must be finite and strictly positive. An explicit block count
+    /// takes precedence over absolute KV-cache bytes, which take precedence over
+    /// this utilization/profile setting.
+    #[must_use]
+    pub fn gpu_memory_utilization(mut self, value: f64) -> Self {
+        self.config.gpu_memory_utilization = Some(value);
+        self
+    }
+
+    /// Sets an absolute KV-cache memory budget in bytes.
+    ///
+    /// The value must be nonzero and fit the native signed 64-bit field. An
+    /// explicit block count takes precedence over this budget.
+    #[must_use]
+    pub fn kv_cache_memory_bytes(mut self, value: u64) -> Self {
+        self.config.kv_cache_memory_bytes = Some(value);
+        self
+    }
+
+    pub fn load(self) -> Result<EmbeddingEngine, Error> {
+        Ok(EmbeddingEngine {
+            inner: load_engine::<EmbeddingTask>(self.config)?,
+        })
+    }
+}
+
 impl EmbeddingEngine {
+    /// Starts a restricted embedding engine configuration.
+    pub fn builder(model_path: impl Into<PathBuf>) -> EmbeddingEngineBuilder {
+        EmbeddingEngineBuilder::new(model_path)
+    }
+
     /// Loads a native engine owner with an embedding-only Rust method surface.
     ///
     /// ABI 17 cannot inspect the resolved task at load time. This constructor does
     /// not probe or infer checkpoint architecture; native task selection and
     /// wrong-task diagnostics remain authoritative.
     pub fn load(model_path: impl Into<PathBuf>) -> Result<Self, Error> {
-        Ok(Self {
-            inner: load_engine::<EmbeddingTask>(ModelConfig::new(model_path))?,
-        })
+        Self::builder(model_path).load()
     }
 
     /// Runs one blocking native embedding batch.
@@ -2358,11 +2492,12 @@ mod tests {
         embedding_from_raw, generate_video_with, load_engine_with, load_video_engine_with,
         token_completion_from_raw, transcribe_with, transcription_from_raw,
         validate_embedding_count, validate_pcm_input, validate_pointer_count, validate_token_input,
-        video_mux_argv_from_raw, Device, EmbeddingTask, MarshaledEmbeddingInput,
-        MarshaledModelParams, MarshaledTranscriptionInput, MarshaledVideoGenerationParams,
-        MarshaledVideoModelParams, ModelConfig, SchedulerPolicy, TextTask, Toggle,
-        TranscriptionInput, TranscriptionTask, VideoDevice, VideoEngine, VideoGenerationParams,
-        VideoModelConfig, VideoMuxParams, VideoPartition,
+        video_mux_argv_from_raw, Device, EmbeddingEngineBuilder, EmbeddingTask,
+        MarshaledEmbeddingInput, MarshaledModelParams, MarshaledTranscriptionInput,
+        MarshaledVideoGenerationParams, MarshaledVideoModelParams, ModelConfig, SchedulerPolicy,
+        TextTask, Toggle, TranscriptionEngineBuilder, TranscriptionInput, TranscriptionTask,
+        VideoDevice, VideoEngine, VideoGenerationParams, VideoModelConfig, VideoMuxParams,
+        VideoPartition,
     };
     use crate::abi::Compatibility;
     use crate::Error;
@@ -2491,6 +2626,93 @@ mod tests {
         assert_eq!(raw.num_blocks, 7);
         assert_eq!(raw.kv_cache_memory_bytes, 8192);
         assert_eq!(raw.gpu_memory_utilization, 2.0);
+    }
+
+    #[test]
+    fn restricted_task_builders_map_only_their_exposed_configuration() {
+        let transcription = TranscriptionEngineBuilder::new("transcription-model")
+            .device(Device::Cuda)
+            .config;
+        assert_eq!(
+            transcription.model_path,
+            PathBuf::from("transcription-model")
+        );
+        assert_eq!(transcription.device, Some(Device::Cuda));
+        assert_eq!(transcription.tokenizer_config_path, None);
+        assert_eq!(transcription.block_size, None);
+        assert_eq!(transcription.num_blocks, None);
+        assert_eq!(transcription.max_model_len, None);
+        assert_eq!(transcription.max_num_seqs, None);
+        assert_eq!(transcription.tool_parser, None);
+        assert_eq!(transcription.reasoning_parser, None);
+        assert_eq!(transcription.speculative_config, None);
+        assert_eq!(transcription.prefix_caching, Toggle::Default);
+        assert_eq!(transcription.max_num_batched_tokens, None);
+        assert_eq!(transcription.scheduler, None);
+        assert_eq!(transcription.kv_transfer_config, None);
+        assert_eq!(transcription.jump_forward, Toggle::Default);
+        assert_eq!(transcription.gpu_memory_utilization, None);
+        assert_eq!(transcription.kv_cache_memory_bytes, None);
+
+        let embedding = EmbeddingEngineBuilder::new("embedding-model")
+            .block_size(16)
+            .num_blocks(32)
+            .max_model_len(128)
+            .max_num_seqs(2)
+            .max_num_batched_tokens(64)
+            .prefix_caching(Toggle::Off)
+            .device(Device::Cpu)
+            .gpu_memory_utilization(1.25)
+            .kv_cache_memory_bytes(4096)
+            .config;
+        assert_eq!(embedding.model_path, PathBuf::from("embedding-model"));
+        assert_eq!(embedding.block_size, Some(16));
+        assert_eq!(embedding.num_blocks, Some(32));
+        assert_eq!(embedding.max_model_len, Some(128));
+        assert_eq!(embedding.max_num_seqs, Some(2));
+        assert_eq!(embedding.max_num_batched_tokens, Some(64));
+        assert_eq!(embedding.prefix_caching, Toggle::Off);
+        assert_eq!(embedding.device, Some(Device::Cpu));
+        assert_eq!(embedding.gpu_memory_utilization, Some(1.25));
+        assert_eq!(embedding.kv_cache_memory_bytes, Some(4096));
+        assert_eq!(embedding.tokenizer_config_path, None);
+        assert_eq!(embedding.tool_parser, None);
+        assert_eq!(embedding.reasoning_parser, None);
+        assert_eq!(embedding.speculative_config, None);
+        assert_eq!(embedding.scheduler, None);
+        assert_eq!(embedding.kv_transfer_config, None);
+        assert_eq!(embedding.jump_forward, Toggle::Default);
+    }
+
+    #[test]
+    fn restricted_task_builder_defaults_preserve_unexposed_native_values() {
+        for config in [
+            TranscriptionEngineBuilder::new("transcription-model").config,
+            EmbeddingEngineBuilder::new("embedding-model").config,
+        ] {
+            let defaults = native_defaults();
+            let expected_path = config.model_path.to_string_lossy().into_owned();
+            let mut params = MarshaledModelParams::new(config).expect("marshal task builder");
+            params.apply_defaults(defaults);
+            let raw = params.raw();
+            assert_eq!(c_string(raw.model_path), expected_path);
+            assert_eq!(raw.tokenizer_config_path, defaults.tokenizer_config_path);
+            assert_eq!(raw.block_size, defaults.block_size);
+            assert_eq!(raw.num_blocks, defaults.num_blocks);
+            assert_eq!(raw.max_model_len, defaults.max_model_len);
+            assert_eq!(raw.max_num_seqs, defaults.max_num_seqs);
+            assert_eq!(raw.tool_parser, defaults.tool_parser);
+            assert_eq!(raw.reasoning_parser, defaults.reasoning_parser);
+            assert_eq!(raw.speculative_config, defaults.speculative_config);
+            assert_eq!(raw.enable_prefix_caching, defaults.enable_prefix_caching);
+            assert_eq!(raw.max_num_batched_tokens, defaults.max_num_batched_tokens);
+            assert_eq!(raw.scheduling_policy, defaults.scheduling_policy);
+            assert_eq!(raw.kv_transfer_config, defaults.kv_transfer_config);
+            assert_eq!(raw.enable_jump_forward, defaults.enable_jump_forward);
+            assert_eq!(raw.device, defaults.device);
+            assert_eq!(raw.gpu_memory_utilization, defaults.gpu_memory_utilization);
+            assert_eq!(raw.kv_cache_memory_bytes, defaults.kv_cache_memory_bytes);
+        }
     }
 
     fn assert_shared_load_order<Task>() {

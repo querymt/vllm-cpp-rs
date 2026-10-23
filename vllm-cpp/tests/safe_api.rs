@@ -3,16 +3,18 @@ use std::path::Path;
 
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 use vllm_cpp::{
-    compose_video_mux_argv, Device, EmbeddingEngine, EmbeddingResult, Engine, EngineBuilder, Error,
-    HuggingFaceError, HuggingFaceModel, Request, SchedulerPolicy, Toggle, TokenCompletion,
-    Transcription, TranscriptionEngine, TranscriptionInput, VideoDevice, VideoEngine,
-    VideoEngineBuilder, VideoGenerationParams, VideoMuxArgv, VideoMuxParams, VideoPartition,
-    VideoResult,
+    compose_video_mux_argv, Device, EmbeddingEngine, EmbeddingEngineBuilder, EmbeddingResult,
+    Engine, EngineBuilder, Error, HuggingFaceError, HuggingFaceModel, Request, SchedulerPolicy,
+    Toggle, TokenCompletion, Transcription, TranscriptionEngine, TranscriptionEngineBuilder,
+    TranscriptionInput, VideoDevice, VideoEngine, VideoEngineBuilder, VideoGenerationParams,
+    VideoMuxArgv, VideoMuxParams, VideoPartition, VideoResult,
 };
 
 assert_impl_all!(Device: Clone, Copy, std::fmt::Debug, Default, Eq, PartialEq, Send, Sync);
 assert_impl_all!(Engine: Send, Sync, Clone);
 assert_impl_all!(EngineBuilder: Clone, std::fmt::Debug, Send, Sync);
+assert_impl_all!(TranscriptionEngineBuilder: Clone, std::fmt::Debug, Send, Sync);
+assert_impl_all!(EmbeddingEngineBuilder: Clone, std::fmt::Debug, Send, Sync);
 assert_impl_all!(HuggingFaceError: Clone, std::fmt::Debug, Eq, PartialEq);
 assert_impl_all!(HuggingFaceModel: Clone, std::fmt::Debug);
 assert_impl_all!(Request: Send);
@@ -29,8 +31,8 @@ assert_impl_all!(VideoMuxParams: Clone, std::fmt::Debug, Send, Sync);
 assert_impl_all!(VideoResult: Clone, std::fmt::Debug, Eq, PartialEq, Send, Sync);
 assert_impl_all!(VideoMuxArgv: Clone, std::fmt::Debug, Eq, PartialEq, Send, Sync);
 assert_not_impl_any!(Request: Sync);
-assert_not_impl_any!(TranscriptionEngine: Send, Sync);
-assert_not_impl_any!(EmbeddingEngine: Send, Sync);
+assert_not_impl_any!(TranscriptionEngine: Send, Sync, Clone);
+assert_not_impl_any!(EmbeddingEngine: Send, Sync, Clone);
 assert_not_impl_any!(VideoEngine: Send, Sync, Clone);
 
 fn missing_model() -> &'static str {
@@ -82,15 +84,33 @@ fn reports_expected_abi() {
 }
 
 #[test]
-fn missing_model_is_typed_for_every_task_owner() {
+fn missing_model_is_typed_for_every_task_owner_and_builder() {
     let errors = [
         Engine::load(missing_model()).unwrap_err(),
         TranscriptionEngine::load(missing_model())
             .err()
             .expect("missing transcription model error"),
+        TranscriptionEngine::builder(missing_model())
+            .device(Device::Cpu)
+            .load()
+            .err()
+            .expect("configured missing transcription model error"),
         EmbeddingEngine::load(missing_model())
             .err()
             .expect("missing embedding model error"),
+        EmbeddingEngine::builder(missing_model())
+            .block_size(16)
+            .num_blocks(32)
+            .max_model_len(128)
+            .max_num_seqs(2)
+            .max_num_batched_tokens(64)
+            .prefix_caching(Toggle::Off)
+            .device(Device::Cpu)
+            .gpu_memory_utilization(1.25)
+            .kv_cache_memory_bytes(4096)
+            .load()
+            .err()
+            .expect("configured missing embedding model error"),
     ];
     for error in errors {
         assert!(matches!(error, Error::ModelLoad { .. }), "{error:?}");
@@ -109,13 +129,25 @@ fn malformed_engine_json_is_invalid_argument_before_loading() {
 
 #[test]
 fn interior_nul_fails_before_ffi() {
-    let error = Engine::builder("bad\0model").load().unwrap_err();
-    assert_eq!(
-        error,
-        Error::InteriorNul {
-            field: "model path"
-        }
-    );
+    let errors = [
+        Engine::builder("bad\0model").load().unwrap_err(),
+        TranscriptionEngineBuilder::new("bad\0model")
+            .load()
+            .err()
+            .expect("transcription interior NUL"),
+        EmbeddingEngineBuilder::new("bad\0model")
+            .load()
+            .err()
+            .expect("embedding interior NUL"),
+    ];
+    for error in errors {
+        assert_eq!(
+            error,
+            Error::InteriorNul {
+                field: "model path"
+            }
+        );
+    }
 }
 
 #[test]
@@ -149,28 +181,44 @@ fn engine_builder_accepts_all_safe_options() {
 #[test]
 fn rejects_invalid_gpu_memory_utilization() {
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0, -1.0] {
-        let error = Engine::builder(missing_model())
-            .gpu_memory_utilization(value)
-            .load()
-            .unwrap_err();
-        assert!(
-            matches!(error, Error::InvalidConfiguration { .. }),
-            "{value:?}: {error:?}"
-        );
+        for error in [
+            Engine::builder(missing_model())
+                .gpu_memory_utilization(value)
+                .load()
+                .unwrap_err(),
+            EmbeddingEngine::builder(missing_model())
+                .gpu_memory_utilization(value)
+                .load()
+                .err()
+                .expect("invalid embedding utilization"),
+        ] {
+            assert!(
+                matches!(error, Error::InvalidConfiguration { .. }),
+                "{value:?}: {error:?}"
+            );
+        }
     }
 }
 
 #[test]
 fn rejects_invalid_kv_cache_memory_bytes() {
     for value in [0, i64::MAX as u64 + 1, u64::MAX] {
-        let error = Engine::builder(missing_model())
-            .kv_cache_memory_bytes(value)
-            .load()
-            .unwrap_err();
-        assert!(
-            matches!(error, Error::InvalidConfiguration { .. }),
-            "{value}: {error:?}"
-        );
+        for error in [
+            Engine::builder(missing_model())
+                .kv_cache_memory_bytes(value)
+                .load()
+                .unwrap_err(),
+            EmbeddingEngine::builder(missing_model())
+                .kv_cache_memory_bytes(value)
+                .load()
+                .err()
+                .expect("invalid embedding KV bytes"),
+        ] {
+            assert!(
+                matches!(error, Error::InvalidConfiguration { .. }),
+                "{value}: {error:?}"
+            );
+        }
     }
 }
 
