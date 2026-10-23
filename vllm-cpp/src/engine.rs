@@ -1,26 +1,64 @@
 use std::ffi::{CStr, CString};
+use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use vllm_cpp_sys as ffi;
 
+use crate::abi::Compatibility;
 use crate::callback::{
     callback_trampoline, CallbackState, StreamControl, StreamEvent, StreamOutcome,
 };
 use crate::error::{invalid_configuration, status_result, Error};
-use crate::params::{SamplingParams, SchedulerPolicy, Toggle};
+use crate::params::{Device, SamplingParams, SchedulerPolicy, Toggle};
 
-/// A cloneable vllm.cpp serving engine.
+/// A cloneable, `Send + Sync` vllm.cpp text-generation engine.
 #[derive(Clone)]
 pub struct Engine {
     pub(crate) inner: Arc<EngineInner>,
 }
 
-pub(crate) struct EngineInner {
+pub(crate) struct TextTask;
+struct TranscriptionTask;
+struct EmbeddingTask;
+
+pub(crate) struct OwnedEngine<Task> {
     pub(crate) raw: NonNull<ffi::vllm_engine>,
+    pub(crate) compatibility: Compatibility,
+    _task: PhantomData<Task>,
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
+struct LoadedEngine<Task> {
+    raw: NonNull<ffi::vllm_engine>,
+    compatibility: Compatibility,
+    _task: PhantomData<Task>,
+}
+
+pub(crate) type EngineInner = OwnedEngine<TextTask>;
+
+/// A thread-local RAII owner for a native transcription-task engine.
+///
+/// ABI 17 has no task query, so loading cannot prove that a checkpoint supports
+/// transcription. Native task selection and future wrong-task diagnostics remain
+/// authoritative. This owner intentionally exposes no operation yet and is
+/// neither `Send` nor `Sync`.
+pub struct TranscriptionEngine {
+    _inner: OwnedEngine<TranscriptionTask>,
+}
+
+/// A thread-local RAII owner for a native embedding-task engine.
+///
+/// ABI 17 has no task query, so loading cannot prove that a checkpoint supports
+/// embeddings. Native task selection and future wrong-task diagnostics remain
+/// authoritative. This owner intentionally exposes no operation yet and is
+/// neither `Send` nor `Sync`.
+pub struct EmbeddingEngine {
+    _inner: OwnedEngine<EmbeddingTask>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -32,9 +70,14 @@ impl std::fmt::Debug for Engine {
     }
 }
 
-/// Builder for one complete serving engine.
+/// Builder for one complete text-generation engine.
 #[derive(Clone, Debug)]
 pub struct EngineBuilder {
+    config: ModelConfig,
+}
+
+#[derive(Clone, Debug)]
+struct ModelConfig {
     model_path: PathBuf,
     tokenizer_config_path: Option<PathBuf>,
     block_size: Option<u32>,
@@ -46,9 +89,180 @@ pub struct EngineBuilder {
     speculative_config: Option<String>,
     prefix_caching: Toggle,
     max_num_batched_tokens: Option<u32>,
-    scheduler: SchedulerPolicy,
+    scheduler: Option<SchedulerPolicy>,
     kv_transfer_config: Option<String>,
     jump_forward: Toggle,
+    device: Option<Device>,
+    gpu_memory_utilization: Option<f64>,
+    kv_cache_memory_bytes: Option<u64>,
+}
+
+struct MarshaledModelParams {
+    raw: Option<ffi::vllm_model_params>,
+    model_path: CString,
+    tokenizer_config_path: Option<CString>,
+    block_size: Option<i32>,
+    num_blocks: Option<i32>,
+    max_model_len: Option<i32>,
+    max_num_seqs: Option<i32>,
+    tool_parser: Option<CString>,
+    reasoning_parser: Option<CString>,
+    speculative_config: Option<CString>,
+    prefix_caching: Toggle,
+    max_num_batched_tokens: Option<i32>,
+    scheduling_policy: Option<CString>,
+    kv_transfer_config: Option<CString>,
+    jump_forward: Toggle,
+    device: Option<Device>,
+    gpu_memory_utilization: Option<f64>,
+    kv_cache_memory_bytes: Option<i64>,
+}
+
+impl ModelConfig {
+    fn new(model_path: impl Into<PathBuf>) -> Self {
+        Self {
+            model_path: model_path.into(),
+            tokenizer_config_path: None,
+            block_size: None,
+            num_blocks: None,
+            max_model_len: None,
+            max_num_seqs: None,
+            tool_parser: None,
+            reasoning_parser: None,
+            speculative_config: None,
+            prefix_caching: Toggle::Default,
+            max_num_batched_tokens: None,
+            scheduler: None,
+            kv_transfer_config: None,
+            jump_forward: Toggle::Default,
+            device: None,
+            gpu_memory_utilization: None,
+            kv_cache_memory_bytes: None,
+        }
+    }
+}
+
+impl MarshaledModelParams {
+    fn new(config: ModelConfig) -> Result<Self, Error> {
+        let gpu_memory_utilization = match config.gpu_memory_utilization {
+            Some(value) if !value.is_finite() || value <= 0.0 => {
+                return Err(invalid_configuration(
+                    "gpu_memory_utilization must be finite and strictly positive",
+                ));
+            }
+            value => value,
+        };
+        let kv_cache_memory_bytes = match config.kv_cache_memory_bytes {
+            Some(0) => {
+                return Err(invalid_configuration(
+                    "kv_cache_memory_bytes must be greater than zero",
+                ));
+            }
+            Some(value) => Some(i64::try_from(value).map_err(|_| {
+                invalid_configuration("kv_cache_memory_bytes exceeds native i64 range")
+            })?),
+            None => None,
+        };
+
+        Ok(Self {
+            raw: None,
+            model_path: path_to_cstring(&config.model_path, "model path")?,
+            tokenizer_config_path: config
+                .tokenizer_config_path
+                .as_deref()
+                .map(|path| path_to_cstring(path, "tokenizer config path"))
+                .transpose()?,
+            block_size: optional_u32_to_i32(config.block_size, "block_size")?,
+            num_blocks: optional_u32_to_i32(config.num_blocks, "num_blocks")?,
+            max_model_len: optional_u32_to_i32(config.max_model_len, "max_model_len")?,
+            max_num_seqs: optional_u32_to_i32(config.max_num_seqs, "max_num_seqs")?,
+            tool_parser: optional_cstring(config.tool_parser.as_deref(), "tool parser")?,
+            reasoning_parser: optional_cstring(
+                config.reasoning_parser.as_deref(),
+                "reasoning parser",
+            )?,
+            speculative_config: optional_cstring(
+                config.speculative_config.as_deref(),
+                "speculative configuration",
+            )?,
+            prefix_caching: config.prefix_caching,
+            max_num_batched_tokens: optional_u32_to_i32(
+                config.max_num_batched_tokens,
+                "max_num_batched_tokens",
+            )?,
+            scheduling_policy: config
+                .scheduler
+                .map(|value| to_cstring(value.as_str(), "scheduler policy"))
+                .transpose()?,
+            kv_transfer_config: optional_cstring(
+                config.kv_transfer_config.as_deref(),
+                "KV transfer configuration",
+            )?,
+            jump_forward: config.jump_forward,
+            device: config.device,
+            gpu_memory_utilization,
+            kv_cache_memory_bytes,
+        })
+    }
+
+    fn apply_defaults(&mut self, mut raw: ffi::vllm_model_params) {
+        raw.model_path = self.model_path.as_ptr();
+        if let Some(value) = &self.tokenizer_config_path {
+            raw.tokenizer_config_path = value.as_ptr();
+        }
+        if let Some(value) = self.block_size {
+            raw.block_size = value;
+        }
+        if let Some(value) = self.num_blocks {
+            raw.num_blocks = value;
+        }
+        if let Some(value) = self.max_model_len {
+            raw.max_model_len = value;
+        }
+        if let Some(value) = self.max_num_seqs {
+            raw.max_num_seqs = value;
+        }
+        if let Some(value) = &self.tool_parser {
+            raw.tool_parser = value.as_ptr();
+        }
+        if let Some(value) = &self.reasoning_parser {
+            raw.reasoning_parser = value.as_ptr();
+        }
+        if let Some(value) = &self.speculative_config {
+            raw.speculative_config = value.as_ptr();
+        }
+        if self.prefix_caching != Toggle::Default {
+            raw.enable_prefix_caching = self.prefix_caching.as_native();
+        }
+        if let Some(value) = self.max_num_batched_tokens {
+            raw.max_num_batched_tokens = value;
+        }
+        if let Some(value) = &self.scheduling_policy {
+            raw.scheduling_policy = value.as_ptr();
+        }
+        if let Some(value) = &self.kv_transfer_config {
+            raw.kv_transfer_config = value.as_ptr();
+        }
+        if self.jump_forward != Toggle::Default {
+            raw.enable_jump_forward = self.jump_forward.as_native();
+        }
+        if let Some(value) = self.device {
+            raw.device = value.as_native();
+        }
+        if let Some(value) = self.gpu_memory_utilization {
+            raw.gpu_memory_utilization = value;
+        }
+        if let Some(value) = self.kv_cache_memory_bytes {
+            raw.kv_cache_memory_bytes = value;
+        }
+        self.raw = Some(raw);
+    }
+
+    fn raw(&self) -> &ffi::vllm_model_params {
+        self.raw
+            .as_ref()
+            .expect("native defaults must be applied before model loading")
+    }
 }
 
 /// Why native generation finished.
@@ -87,7 +301,7 @@ impl Engine {
     /// Runs one blocking text completion.
     pub fn complete(&self, prompt: &str, params: &SamplingParams) -> Result<Completion, Error> {
         let prompt = to_cstring(prompt, "prompt")?;
-        let params = params.marshal()?;
+        let params = params.marshal(&self.inner.compatibility)?;
         let mut raw = MaybeUninit::<ffi::vllm_completion>::uninit();
         // SAFETY: the engine is owned and live, all pointers remain valid for the
         // call, and out storage is initialized by native code on success.
@@ -129,7 +343,7 @@ impl Engine {
         F: FnMut(StreamEvent) -> StreamControl,
     {
         let prompt = to_cstring(prompt, "prompt")?;
-        let params = params.marshal()?;
+        let params = params.marshal(&self.inner.compatibility)?;
         let mut state = CallbackState::new(&mut callback);
         // SAFETY: state has a stable stack address for this blocking call; the C
         // API does not retain user_data after returning.
@@ -220,99 +434,97 @@ impl Engine {
     }
 }
 
-impl Drop for EngineInner {
+impl<Task> Drop for OwnedEngine<Task> {
     fn drop(&mut self) {
-        // SAFETY: EngineInner exclusively owns this live handle. Native teardown
-        // joins engine workers before returning.
+        // SAFETY: each OwnedEngine exclusively owns one live handle. Native
+        // teardown joins engine workers before returning.
         unsafe { ffi::vllm_engine_free(self.raw.as_ptr()) };
     }
 }
 
-// SAFETY: vllm.cpp documents concurrent completion submissions as thread-safe,
-// and EngineInner keeps the engine alive until the last shared owner is dropped.
-unsafe impl Send for EngineInner {}
-// SAFETY: shared references may submit concurrently through native AsyncLLM;
-// destruction cannot race because Arc retains the handle for each active owner.
-unsafe impl Sync for EngineInner {}
+impl<Task> From<LoadedEngine<Task>> for OwnedEngine<Task> {
+    fn from(loaded: LoadedEngine<Task>) -> Self {
+        Self {
+            raw: loaded.raw,
+            compatibility: loaded.compatibility,
+            _task: PhantomData,
+            _not_send_sync: PhantomData,
+        }
+    }
+}
+
+// SAFETY: vllm.cpp documents concurrent text completion submissions as
+// thread-safe, and Arc keeps the text engine live through active operations.
+unsafe impl Send for OwnedEngine<TextTask> {}
+// SAFETY: shared text owners submit through native AsyncLLM; Arc prevents
+// destruction from racing an operation. No other task owner receives this impl.
+unsafe impl Sync for OwnedEngine<TextTask> {}
 
 impl EngineBuilder {
     #[must_use]
     pub fn new(model_path: impl Into<PathBuf>) -> Self {
         Self {
-            model_path: model_path.into(),
-            tokenizer_config_path: None,
-            block_size: None,
-            num_blocks: None,
-            max_model_len: None,
-            max_num_seqs: None,
-            tool_parser: None,
-            reasoning_parser: None,
-            speculative_config: None,
-            prefix_caching: Toggle::Default,
-            max_num_batched_tokens: None,
-            scheduler: SchedulerPolicy::Fcfs,
-            kv_transfer_config: None,
-            jump_forward: Toggle::Default,
+            config: ModelConfig::new(model_path),
         }
     }
 
     #[must_use]
     pub fn tokenizer_config_path(mut self, value: impl Into<PathBuf>) -> Self {
-        self.tokenizer_config_path = Some(value.into());
+        self.config.tokenizer_config_path = Some(value.into());
         self
     }
 
     #[must_use]
     pub fn block_size(mut self, value: u32) -> Self {
-        self.block_size = Some(value);
+        self.config.block_size = Some(value);
         self
     }
 
     #[must_use]
     pub fn num_blocks(mut self, value: u32) -> Self {
-        self.num_blocks = Some(value);
+        self.config.num_blocks = Some(value);
         self
     }
 
     #[must_use]
     pub fn max_model_len(mut self, value: u32) -> Self {
-        self.max_model_len = Some(value);
+        self.config.max_model_len = Some(value);
         self
     }
 
     #[must_use]
     pub fn max_num_seqs(mut self, value: u32) -> Self {
-        self.max_num_seqs = Some(value);
+        self.config.max_num_seqs = Some(value);
         self
     }
 
     #[must_use]
     pub fn tool_parser(mut self, value: impl Into<String>) -> Self {
-        self.tool_parser = Some(value.into());
+        self.config.tool_parser = Some(value.into());
         self
     }
 
     #[must_use]
     pub fn reasoning_parser(mut self, value: impl Into<String>) -> Self {
-        self.reasoning_parser = Some(value.into());
+        self.config.reasoning_parser = Some(value.into());
         self
     }
 
     #[must_use]
     pub fn speculative_config(mut self, value: impl Into<String>) -> Self {
-        self.speculative_config = Some(value.into());
+        self.config.speculative_config = Some(value.into());
         self
     }
 
     #[must_use]
     pub fn prefix_caching(mut self, value: Toggle) -> Self {
-        self.prefix_caching = value;
+        self.config.prefix_caching = value;
         self
     }
 
     #[must_use]
     pub fn max_num_batched_tokens(mut self, value: u32) -> Self {
-        self.max_num_batched_tokens = Some(value);
+        self.config.max_num_batched_tokens = Some(value);
         self
     }
 
@@ -325,97 +537,123 @@ impl EngineBuilder {
     /// future C ABI/API change.
     #[must_use]
     pub fn scheduler(mut self, value: SchedulerPolicy) -> Self {
-        self.scheduler = value;
+        self.config.scheduler = Some(value);
         self
     }
 
     #[must_use]
     pub fn kv_transfer_config(mut self, value: impl Into<String>) -> Self {
-        self.kv_transfer_config = Some(value.into());
+        self.config.kv_transfer_config = Some(value.into());
         self
     }
 
     #[must_use]
     pub fn jump_forward(mut self, value: Toggle) -> Self {
-        self.jump_forward = value;
+        self.config.jump_forward = value;
+        self
+    }
+
+    /// Selects the required native device.
+    ///
+    /// [`Device::Cuda`] never silently falls back when CUDA is unavailable.
+    #[must_use]
+    pub fn device(mut self, value: Device) -> Self {
+        self.config.device = Some(value);
+        self
+    }
+
+    /// Sets the native fraction used by GPU memory profiling.
+    ///
+    /// The value must be finite and strictly positive. Values above `1.0` are
+    /// forwarded because the native ABI does not impose an upper bound. An
+    /// explicit block count takes precedence over absolute KV-cache bytes, which
+    /// take precedence over this utilization/profile setting.
+    #[must_use]
+    pub fn gpu_memory_utilization(mut self, value: f64) -> Self {
+        self.config.gpu_memory_utilization = Some(value);
+        self
+    }
+
+    /// Sets an absolute KV-cache memory budget in bytes.
+    ///
+    /// The value must be nonzero and fit the native signed 64-bit field. Native
+    /// code validates the model-dependent minimum. An explicit block count takes
+    /// precedence over this budget, and this budget takes precedence over GPU
+    /// utilization/profile sizing.
+    #[must_use]
+    pub fn kv_cache_memory_bytes(mut self, value: u64) -> Self {
+        self.config.kv_cache_memory_bytes = Some(value);
         self
     }
 
     pub fn load(self) -> Result<Engine, Error> {
-        let model_path = path_to_cstring(&self.model_path, "model path")?;
-        let tokenizer_config_path = self
-            .tokenizer_config_path
-            .as_deref()
-            .map(|path| path_to_cstring(path, "tokenizer config path"))
-            .transpose()?;
-        let tool_parser = optional_cstring(self.tool_parser.as_deref(), "tool parser")?;
-        let reasoning_parser =
-            optional_cstring(self.reasoning_parser.as_deref(), "reasoning parser")?;
-        let speculative_config = optional_cstring(
-            self.speculative_config.as_deref(),
-            "speculative configuration",
-        )?;
-        let scheduling_policy = to_cstring(self.scheduler.as_str(), "scheduler policy")?;
-        let kv_transfer_config = optional_cstring(
-            self.kv_transfer_config.as_deref(),
-            "KV transfer configuration",
-        )?;
-
-        let mut raw = checked_model_params_default()?;
-        raw.model_path = model_path.as_ptr();
-        raw.tokenizer_config_path = optional_pointer(tokenizer_config_path.as_ref());
-        raw.block_size = optional_u32_to_i32(self.block_size, "block_size")?;
-        raw.num_blocks = optional_u32_to_i32(self.num_blocks, "num_blocks")?;
-        raw.max_model_len = optional_u32_to_i32(self.max_model_len, "max_model_len")?;
-        raw.max_num_seqs = optional_u32_to_i32(self.max_num_seqs, "max_num_seqs")?;
-        raw.tool_parser = optional_pointer(tool_parser.as_ref());
-        raw.reasoning_parser = optional_pointer(reasoning_parser.as_ref());
-        raw.speculative_config = optional_pointer(speculative_config.as_ref());
-        raw.enable_prefix_caching = self.prefix_caching.as_native();
-        raw.max_num_batched_tokens =
-            optional_u32_to_i32(self.max_num_batched_tokens, "max_num_batched_tokens")?;
-        raw.scheduling_policy = scheduling_policy.as_ptr();
-        raw.kv_transfer_config = optional_pointer(kv_transfer_config.as_ref());
-        raw.enable_jump_forward = self.jump_forward.as_native();
-
-        let mut output = ptr::null_mut();
-        // SAFETY: all string storage remains live for the call and output points
-        // to writable handle storage.
-        let status = unsafe { ffi::vllm_engine_load(&raw, &mut output) };
-        status_result(status)?;
-        let raw = NonNull::new(output).ok_or_else(|| Error::ModelLoad {
-            message: "vllm_engine_load succeeded without a handle".to_owned(),
-        })?;
         Ok(Engine {
-            inner: Arc::new(EngineInner { raw }),
+            inner: Arc::new(load_engine::<TextTask>(self.config)?),
         })
     }
 }
 
-fn checked_model_params_default() -> Result<ffi::vllm_model_params, Error> {
-    checked_model_params_default_with(
-        || {
-            // SAFETY: this base ABI function takes no pointers or versioned structs.
-            unsafe { ffi::vllm_abi_version() }
-        },
-        || {
-            // SAFETY: exact ABI equality was established immediately before this
-            // by-value return of a versioned struct.
-            unsafe { ffi::vllm_model_params_default() }
-        },
-    )
+impl TranscriptionEngine {
+    /// Loads a native engine owner with a transcription-only Rust method surface.
+    ///
+    /// ABI 17 cannot inspect the resolved task at load time. This constructor does
+    /// not probe or infer checkpoint architecture; native task selection remains
+    /// authoritative for future operations and diagnostics.
+    pub fn load(model_path: impl Into<PathBuf>) -> Result<Self, Error> {
+        Ok(Self {
+            _inner: load_engine::<TranscriptionTask>(ModelConfig::new(model_path))?,
+        })
+    }
 }
 
-fn checked_model_params_default_with(
-    abi_version: impl FnOnce() -> i32,
-    model_params_default: impl FnOnce() -> ffi::vllm_model_params,
-) -> Result<ffi::vllm_model_params, Error> {
-    let actual = abi_version();
-    let expected = ffi::VLLM_ABI_VERSION as i32;
-    if actual != expected {
-        return Err(Error::AbiMismatch { expected, actual });
+impl EmbeddingEngine {
+    /// Loads a native engine owner with an embedding-only Rust method surface.
+    ///
+    /// ABI 17 cannot inspect the resolved task at load time. This constructor does
+    /// not probe or infer checkpoint architecture; native task selection remains
+    /// authoritative for future operations and diagnostics.
+    pub fn load(model_path: impl Into<PathBuf>) -> Result<Self, Error> {
+        Ok(Self {
+            _inner: load_engine::<EmbeddingTask>(ModelConfig::new(model_path))?,
+        })
     }
-    Ok(model_params_default())
+}
+
+fn load_engine<Task>(config: ModelConfig) -> Result<OwnedEngine<Task>, Error> {
+    load_engine_with(
+        config,
+        Compatibility::check,
+        |compatibility| compatibility.model_params_default(),
+        |params, output| {
+            // SAFETY: the marshaled storage backing every pointer remains live for
+            // the call and output points to writable handle storage.
+            unsafe { ffi::vllm_engine_load(params, output) }
+        },
+    )
+    .map(OwnedEngine::from)
+}
+
+fn load_engine_with<Task>(
+    config: ModelConfig,
+    check: impl FnOnce() -> Result<Compatibility, Error>,
+    defaults: impl FnOnce(&Compatibility) -> ffi::vllm_model_params,
+    load: impl FnOnce(&ffi::vllm_model_params, *mut *mut ffi::vllm_engine) -> ffi::vllm_status,
+) -> Result<LoadedEngine<Task>, Error> {
+    let mut params = MarshaledModelParams::new(config)?;
+    let compatibility = check()?;
+    params.apply_defaults(defaults(&compatibility));
+
+    let mut output = ptr::null_mut();
+    let status = load(params.raw(), &mut output);
+    status_result(status)?;
+    let raw = NonNull::new(output).ok_or_else(|| Error::ModelLoad {
+        message: "vllm_engine_load succeeded without a handle".to_owned(),
+    })?;
+    Ok(LoadedEngine {
+        raw,
+        compatibility,
+        _task: PhantomData,
+    })
 }
 
 fn completion_from_raw(raw: &ffi::vllm_completion) -> Result<Completion, Error> {
@@ -457,20 +695,17 @@ fn count_to_u32(value: i32, field: &'static str) -> Result<u32, Error> {
     u32::try_from(value).map_err(|_| invalid_configuration(format!("native {field} was negative")))
 }
 
-fn optional_u32_to_i32(value: Option<u32>, field: &'static str) -> Result<i32, Error> {
-    match value {
-        Some(0) | None => Ok(0),
-        Some(value) => i32::try_from(value)
-            .map_err(|_| invalid_configuration(format!("{field} exceeds native i32 range"))),
-    }
+fn optional_u32_to_i32(value: Option<u32>, field: &'static str) -> Result<Option<i32>, Error> {
+    value
+        .map(|value| {
+            i32::try_from(value)
+                .map_err(|_| invalid_configuration(format!("{field} exceeds native i32 range")))
+        })
+        .transpose()
 }
 
 fn optional_cstring(value: Option<&str>, field: &'static str) -> Result<Option<CString>, Error> {
     value.map(|value| to_cstring(value, field)).transpose()
-}
-
-fn optional_pointer(value: Option<&CString>) -> *const c_char {
-    value.map_or(ptr::null(), |value| value.as_ptr())
 }
 
 fn to_cstring(value: &str, field: &'static str) -> Result<CString, Error> {
@@ -523,31 +758,214 @@ impl Drop for NativeStringGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::checked_model_params_default_with;
-    use crate::Error;
     use std::cell::RefCell;
+    use std::ffi::CStr;
+    use std::ptr::{self, NonNull};
+
+    use vllm_cpp_sys as ffi;
+
+    use super::{
+        load_engine_with, Device, EmbeddingTask, MarshaledModelParams, ModelConfig,
+        SchedulerPolicy, TextTask, Toggle, TranscriptionTask,
+    };
+    use crate::abi::Compatibility;
+    use crate::Error;
+
+    const NATIVE_STRING: &[u8] = b"native-default\0";
+
+    fn native_defaults() -> ffi::vllm_model_params {
+        let pointer = NATIVE_STRING.as_ptr().cast();
+        ffi::vllm_model_params {
+            model_path: pointer,
+            tokenizer_config_path: pointer,
+            block_size: 41,
+            num_blocks: 42,
+            max_model_len: 43,
+            max_num_seqs: 44,
+            tool_parser: pointer,
+            reasoning_parser: pointer,
+            speculative_config: pointer,
+            enable_prefix_caching: 45,
+            max_num_batched_tokens: 46,
+            scheduling_policy: pointer,
+            kv_transfer_config: pointer,
+            enable_jump_forward: 47,
+            device: 48,
+            gpu_memory_utilization: 0.92,
+            kv_cache_memory_bytes: 49,
+        }
+    }
+
+    fn matching_compatibility() -> Result<Compatibility, Error> {
+        Compatibility::check_with(|| ffi::VLLM_ABI_VERSION as i32)
+    }
+
+    fn c_string(pointer: *const std::os::raw::c_char) -> String {
+        assert!(!pointer.is_null());
+        // SAFETY: tests inspect pointers while their MarshaledModelParams owner is live.
+        unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .expect("UTF-8 test string")
+            .to_owned()
+    }
 
     #[test]
-    fn abi_mismatch_prevents_model_params_default_call() {
+    fn default_application_preserves_every_unset_native_value() {
+        let defaults = native_defaults();
+        let mut params = MarshaledModelParams::new(ModelConfig::new("model-dir"))
+            .expect("marshal default model config");
+        params.apply_defaults(defaults);
+        let raw = params.raw();
+
+        assert_eq!(c_string(raw.model_path), "model-dir");
+        assert_eq!(raw.tokenizer_config_path, defaults.tokenizer_config_path);
+        assert_eq!(raw.block_size, defaults.block_size);
+        assert_eq!(raw.num_blocks, defaults.num_blocks);
+        assert_eq!(raw.max_model_len, defaults.max_model_len);
+        assert_eq!(raw.max_num_seqs, defaults.max_num_seqs);
+        assert_eq!(raw.tool_parser, defaults.tool_parser);
+        assert_eq!(raw.reasoning_parser, defaults.reasoning_parser);
+        assert_eq!(raw.speculative_config, defaults.speculative_config);
+        assert_eq!(raw.enable_prefix_caching, defaults.enable_prefix_caching);
+        assert_eq!(raw.max_num_batched_tokens, defaults.max_num_batched_tokens);
+        assert_eq!(raw.scheduling_policy, defaults.scheduling_policy);
+        assert_eq!(raw.kv_transfer_config, defaults.kv_transfer_config);
+        assert_eq!(raw.enable_jump_forward, defaults.enable_jump_forward);
+        assert_eq!(raw.device, defaults.device);
+        assert_eq!(raw.gpu_memory_utilization, defaults.gpu_memory_utilization);
+        assert_eq!(raw.kv_cache_memory_bytes, defaults.kv_cache_memory_bytes);
+    }
+
+    #[test]
+    fn explicit_overrides_and_strings_reach_the_native_view() {
+        let mut config = ModelConfig::new("model-dir");
+        config.tokenizer_config_path = Some("tokenizer.json".into());
+        config.block_size = Some(16);
+        config.num_blocks = Some(32);
+        config.max_model_len = Some(128);
+        config.max_num_seqs = Some(2);
+        config.tool_parser = Some("hermes".to_owned());
+        config.reasoning_parser = Some("reasoning".to_owned());
+        config.speculative_config = Some("{}".to_owned());
+        config.prefix_caching = Toggle::Off;
+        config.max_num_batched_tokens = Some(64);
+        config.scheduler = Some(SchedulerPolicy::LongestPrefixMatch);
+        config.kv_transfer_config = Some("{\"kv_role\":\"kv_both\"}".to_owned());
+        config.jump_forward = Toggle::On;
+        config.device = Some(Device::Cuda);
+        config.gpu_memory_utilization = Some(1.25);
+        config.kv_cache_memory_bytes = Some(4096);
+
+        let mut params = MarshaledModelParams::new(config).expect("marshal explicit model config");
+        params.apply_defaults(native_defaults());
+        let raw = params.raw();
+
+        assert_eq!(c_string(raw.model_path), "model-dir");
+        assert_eq!(c_string(raw.tokenizer_config_path), "tokenizer.json");
+        assert_eq!(raw.block_size, 16);
+        assert_eq!(raw.num_blocks, 32);
+        assert_eq!(raw.max_model_len, 128);
+        assert_eq!(raw.max_num_seqs, 2);
+        assert_eq!(c_string(raw.tool_parser), "hermes");
+        assert_eq!(c_string(raw.reasoning_parser), "reasoning");
+        assert_eq!(c_string(raw.speculative_config), "{}");
+        assert_eq!(raw.enable_prefix_caching, Toggle::Off.as_native());
+        assert_eq!(raw.max_num_batched_tokens, 64);
+        assert_eq!(c_string(raw.scheduling_policy), "lpm");
+        assert_eq!(
+            c_string(raw.kv_transfer_config),
+            "{\"kv_role\":\"kv_both\"}"
+        );
+        assert_eq!(raw.enable_jump_forward, Toggle::On.as_native());
+        assert_eq!(raw.device, Device::Cuda.as_native());
+        assert_eq!(raw.gpu_memory_utilization, 1.25);
+        assert_eq!(raw.kv_cache_memory_bytes, 4096);
+    }
+
+    #[test]
+    fn forwards_all_memory_settings_without_changing_native_precedence() {
+        let mut config = ModelConfig::new("model-dir");
+        config.num_blocks = Some(7);
+        config.gpu_memory_utilization = Some(2.0);
+        config.kv_cache_memory_bytes = Some(8192);
+
+        let mut params = MarshaledModelParams::new(config).expect("marshal memory settings");
+        params.apply_defaults(native_defaults());
+        let raw = params.raw();
+        assert_eq!(raw.num_blocks, 7);
+        assert_eq!(raw.kv_cache_memory_bytes, 8192);
+        assert_eq!(raw.gpu_memory_utilization, 2.0);
+    }
+
+    fn assert_shared_load_order<Task>() {
         let calls = RefCell::new(Vec::new());
-        let result = checked_model_params_default_with(
+        let loaded = load_engine_with::<Task>(
+            ModelConfig::new("shared-model"),
             || {
                 calls.borrow_mut().push("abi");
-                10
+                matching_compatibility()
             },
-            || {
+            |_| {
                 calls.borrow_mut().push("default");
-                unreachable!("default helper must not run after an ABI mismatch")
+                native_defaults()
             },
+            |params, output| {
+                calls.borrow_mut().push("load");
+                assert_eq!(c_string(params.model_path), "shared-model");
+                // SAFETY: output is writable storage supplied by load_engine_with;
+                // the dangling non-null value is never dereferenced or freed.
+                unsafe { *output = NonNull::<ffi::vllm_engine>::dangling().as_ptr() };
+                ffi::vllm_status_VLLM_OK
+            },
+        )
+        .expect("injected load");
+
+        assert_eq!(*calls.borrow(), ["abi", "default", "load"]);
+        assert_eq!(loaded.raw, NonNull::dangling());
+    }
+
+    #[test]
+    fn shared_loader_checks_abi_before_defaults_for_every_task_marker() {
+        assert_shared_load_order::<TextTask>();
+        assert_shared_load_order::<TranscriptionTask>();
+        assert_shared_load_order::<EmbeddingTask>();
+    }
+
+    #[test]
+    fn rust_marshaling_failure_precedes_the_abi_probe() {
+        let calls = RefCell::new(Vec::new());
+        let result = load_engine_with::<TextTask>(
+            ModelConfig::new("bad\0model"),
+            || {
+                calls.borrow_mut().push("abi");
+                matching_compatibility()
+            },
+            |_| unreachable!("default helper must not run after marshaling failure"),
+            |_, _| unreachable!("load must not run after marshaling failure"),
         );
 
         assert!(matches!(
             result,
-            Err(Error::AbiMismatch {
-                expected: 17,
-                actual: 10
+            Err(Error::InteriorNul {
+                field: "model path"
             })
         ));
-        assert_eq!(*calls.borrow(), ["abi"]);
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn successful_status_with_null_handle_is_rejected() {
+        let result = load_engine_with::<TextTask>(
+            ModelConfig::new("model-dir"),
+            matching_compatibility,
+            |_| native_defaults(),
+            |_, output| {
+                // SAFETY: output is writable storage supplied by load_engine_with.
+                unsafe { *output = ptr::null_mut() };
+                ffi::vllm_status_VLLM_OK
+            },
+        );
+
+        assert!(matches!(result, Err(Error::ModelLoad { .. })));
     }
 }

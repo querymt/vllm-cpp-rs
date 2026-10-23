@@ -73,7 +73,7 @@ impl Engine {
     {
         cleanup_sender()?;
         let prompt = to_cstring(prompt, "prompt")?;
-        let mut params = params.marshal()?;
+        let mut params = params.marshal(&self.inner.compatibility)?;
         let mut callback = Box::new(AsyncCallbackState::new(callback));
         let mut output = ptr::null_mut();
         // SAFETY: the engine is retained by the returned Request, native code
