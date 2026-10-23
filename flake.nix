@@ -37,6 +37,7 @@
                 pkgs.jq
                 pkgs.ninja
                 pkgs.pkg-config
+                pkgs.python3
                 pkgs.gnutar
                 pkgs.llvmPackages.clang
                 pkgs.llvmPackages.bintools
