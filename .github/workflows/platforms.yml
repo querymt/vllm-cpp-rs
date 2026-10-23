@@ -175,9 +175,16 @@ jobs:
           cmake -S vllm-cpp-sys/vllm.cpp -B target/vulkan-native \
             -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DVLLM_CPP_BUILD_TESTS=ON -DVLLM_CPP_BUILD_EXAMPLES=OFF \
-            -DVLLM_CPP_SERVER=OFF -DVLLM_CPP_CUDA=OFF \
-            -DVLLM_CPP_METAL=OFF -DVLLM_CPP_MLX=OFF \
-            -DVLLM_CPP_VULKAN=ON -DVLLM_CPP_TRITON=OFF
+            -DVLLM_CPP_SERVER=OFF -DVLLM_CPP_HIP=OFF \
+            -DVLLM_CPP_TENSTORRENT=OFF -DVLLM_CPP_LITERAL_STATIC=OFF \
+            -DVLLM_CPP_BENCH_PROFILE_CONTROL=OFF -DVLLM_CPP_NCCL=OFF \
+            -DVLLM_CPP_MARLIN=ON -DVLLM_CPP_FLASH_ATTN=ON \
+            -DVLLM_CPP_CUDA=OFF -DVLLM_CPP_METAL=OFF \
+            -DVLLM_CPP_MLX=OFF -DVLLM_CPP_VULKAN=ON \
+            -DVLLM_CPP_TRITON=OFF -DVLLM_CPP_TRITON_REGEN=OFF \
+            -DVLLM_CPP_TRITON_VENDORED_ARCH= \
+            -DVLLM_CPP_TRITON_TARGET= -DVLLM_CPP_CUTLASS_FETCH=OFF \
+            -DVLLM_CPP_SANITIZE=OFF
           cmake --build target/vulkan-native --target test_vulkan_backend test_backend_cross_device
           ctest --test-dir target/vulkan-native --output-on-failure \
             --tests-regex '^(test_vulkan_backend|test_backend_cross_device)$'

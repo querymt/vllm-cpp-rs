@@ -12,7 +12,8 @@
 | Marlin / GPTQ-Marlin slice | `vllm.cpp/src/vt/cuda/marlin/**` | vLLM commit `e24d1b24`, with retained file notices and vllm.cpp adapter changes | Apache-2.0 in `vllm.cpp/LICENSE` and retained source notices |
 | Flash Linear Attention Triton kernels | `vllm.cpp/triton_kernels/**`, generated AOT files under `vllm.cpp/src/vt/cuda/triton_aot_vendored/**` | FLA source ported through vLLM 0.24.0; exact source and artifact hashes are pinned in each AOT `MANIFEST` | `licenses/FLASH-LINEAR-ATTENTION-MIT.txt` |
 | nlohmann/json | `vllm.cpp/third_party/nlohmann/**` | nlohmann/json 3.12.0 | MIT notice retained in `json.hpp` |
+| doctest | `vllm.cpp/third_party/doctest/doctest.h` | doctest 2.5.2, required by the packaged ROCm syntax-check source | `licenses/DOCTEST-MIT.txt` |
 
-The package excludes upstream tests, fixtures, benchmarks, models, external SDKs, and build output. It contains only native source/build inputs and required licenses/notices.
+The package excludes upstream tests, fixtures, benchmarks, models, external SDKs, and build output. It contains only native source/build inputs and required licenses/notices, including the one ROCm test translation unit compiled unconditionally as a syntax check.
 
 vllm.cpp is an independent community project and is not affiliated with or endorsed by the vLLM project, the PyTorch Foundation, or the Linux Foundation.
