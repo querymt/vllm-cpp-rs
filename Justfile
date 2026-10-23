@@ -535,6 +535,7 @@ package-test:
       examples/setup_test_model.rs \
       examples/stream.rs \
       examples/structured.rs \
+      examples/video_generate.rs \
       src/abi.rs \
       src/callback.rs \
       src/engine.rs \

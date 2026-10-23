@@ -31,9 +31,10 @@ jobs:
         with:
           components: rustfmt
       - name: Install Just
-        uses: extractions/setup-just@v3.1.0
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
-          just-version: "1.40.0"
+          tool: just@1.40.0
+          fallback: none
       - name: Check formatting
         run: just fmt-check
 
@@ -57,9 +58,10 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
       - name: Install Just
-        uses: extractions/setup-just@v3.1.0
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
-          just-version: "1.40.0"
+          tool: just@1.40.0
+          fallback: none
       - name: Lint
         run: just lint
 
@@ -82,9 +84,10 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
       - name: Install Just
-        uses: extractions/setup-just@v3.1.0
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
-          just-version: "1.40.0"
+          tool: just@1.40.0
+          fallback: none
       - name: Build documentation
         run: just docs
 
@@ -107,9 +110,10 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build
       - name: Install Just
-        uses: extractions/setup-just@v3.1.0
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
-          just-version: "1.40.0"
+          tool: just@1.40.0
+          fallback: none
       - name: Test model-free workspace targets
         run: just test
 
@@ -132,9 +136,10 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build python3
       - name: Install Just
-        uses: extractions/setup-just@v3.1.0
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
-          just-version: "1.40.0"
+          tool: just@1.40.0
+          fallback: none
       - name: Test model-free ownership under sanitizers
         run: just sanitizers-model-free
 
@@ -157,9 +162,10 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends binutils build-essential clang cmake ninja-build python3
       - name: Install Just
-        uses: extractions/setup-just@v3.1.0
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
-          just-version: "1.40.0"
+          tool: just@1.40.0
+          fallback: none
       - name: Install bindgen
         run: cargo install bindgen-cli --version 0.72.1 --locked
       - name: Check generated bindings and FFI conformance
@@ -188,9 +194,10 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends build-essential cmake ninja-build jq
       - name: Install Just
-        uses: extractions/setup-just@v3.1.0
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
-          just-version: "1.40.0"
+          tool: just@1.40.0
+          fallback: none
       - name: Test crate archives and downstream consumers
         run: just package-test
       - name: Dry-run workspace publish
