@@ -1,9 +1,9 @@
 //! Raw FFI declarations for the stable vllm.cpp C API.
 //!
 //! The checked-in bindings are generated from `vllm.cpp/include/vllm.h` and
-//! expose that header's 19-symbol C boundary, versioned structs, constants, and
-//! callback signatures. They target ABI version 10 from pinned vllm.cpp commit
-//! `34aedfbe8ed9779697905541a62e2160ccfd9c05`. This exported ABI is narrower than
+//! expose that header's 35-symbol C boundary, versioned structs, constants, and
+//! callback signatures. They target ABI version 17 from pinned vllm.cpp commit
+//! `7020de93652ca920424a10ac5255b34810dd2f24` (`v0.0.2`). This exported ABI is narrower than
 //! the broader native C++ implementation and does not expose undocumented
 //! vllm.cpp internals.
 //!
@@ -14,7 +14,7 @@
 //! header. They must check returned status values, copy thread-local error text
 //! before another API call on that thread, and release engines, requests,
 //! completions, and allocated strings with their matching `vllm_*_free`
-//! functions. In particular, ABI version 10 prohibits waiting for or freeing a
+//! functions. In particular, ABI version 17 prohibits waiting for or freeing a
 //! request from that request's callback thread. Prefer the safe `vllm-cpp` crate
 //! unless direct ABI access is required.
 //!

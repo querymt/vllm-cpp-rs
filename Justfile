@@ -164,7 +164,10 @@ link-modes:
     vllm_chat_stream
     vllm_complete
     vllm_complete_stream
+    vllm_complete_tokens
     vllm_completion_free
+    vllm_embed
+    vllm_embedding_result_free
     vllm_engine_free
     vllm_engine_load
     vllm_last_error
@@ -176,8 +179,21 @@ link-modes:
     vllm_request_submit
     vllm_request_wait
     vllm_sampling_params_default
+    vllm_server_main
     vllm_string_free
+    vllm_transcribe
+    vllm_transcription_free
+    vllm_transcription_params_default
     vllm_version
+    vllm_video_engine_free
+    vllm_video_engine_load
+    vllm_video_generate
+    vllm_video_model_params_default
+    vllm_video_mux_argv
+    vllm_video_mux_argv_free
+    vllm_video_mux_params_default
+    vllm_video_params_default
+    vllm_video_result_free
     EOF
       diff -u "$expected" "$actual"
     }
@@ -701,8 +717,8 @@ package-test:
     use vllm_cpp_sys as ffi;
 
     fn main() {
-        assert_eq!(ffi::VLLM_ABI_VERSION, 10);
-        assert_eq!(unsafe { ffi::vllm_abi_version() }, 10);
+        assert_eq!(ffi::VLLM_ABI_VERSION, 17);
+        assert_eq!(unsafe { ffi::vllm_abi_version() }, 17);
         let version = unsafe { CStr::from_ptr(ffi::vllm_version()) };
         assert!(!version.to_bytes().is_empty());
 
@@ -772,8 +788,8 @@ package-test:
     };
 
     fn main() {
-        assert_eq!(expected_abi_version(), 10);
-        assert_eq!(abi_version(), 10);
+        assert_eq!(expected_abi_version(), 17);
+        assert_eq!(abi_version(), 17);
         assert!(!version().expect("native version").is_empty());
         let _params = SamplingParams::greedy()
             .max_tokens(1)

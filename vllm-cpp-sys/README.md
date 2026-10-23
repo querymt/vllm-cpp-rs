@@ -2,7 +2,7 @@
 
 Raw Rust bindings and native linking for the stable C API of [vllm.cpp](https://github.com/mudler/vllm.cpp).
 
-This crate exposes checked-in generated unsafe declarations for the 19 exported C symbols in ABI version 10. Callers are responsible for pointer validity, lifetimes, callback threading, status/error handling, and matching every native allocation with its documented free function. Applications should prefer the current safe [`vllm-cpp`](https://docs.rs/vllm-cpp) crate unless they require direct ABI access. Ordinary consumers do not need Just, bindgen, or libclang.
+This crate exposes checked-in generated unsafe declarations for the 35 exported C symbols in ABI version 17. Callers are responsible for pointer validity, lifetimes, callback threading, status/error handling, and matching every native allocation with its documented free function. Applications should prefer the current safe [`vllm-cpp`](https://docs.rs/vllm-cpp) crate unless they require direct ABI access. Ordinary consumers do not need Just, bindgen, or libclang.
 
 The package contains Rust declarations and conformance tests, native build/link integration, the pinned native source inputs required by the supported feature set, and their licenses/notices. It excludes upstream tests, fixtures, models, examples, benchmarks, agent records, fetched SDKs, external CUTLASS trees, and build output. See the repository [changelog](https://github.com/querymt/vllm-cpp-rs/blob/main/CHANGELOG.md) and [release process](https://github.com/querymt/vllm-cpp-rs/blob/main/RELEASING.md) for the coordinated crate boundary.
 
@@ -14,7 +14,7 @@ The package contains Rust declarations and conformance tests, native build/link 
 
 `bundled` and `system` are mutually exclusive. CPU runtime support is limited to native Linux x86_64; Linux aarch64 and Apple ARM64 have model-free build/test surfaces. Accelerator features below are experimental build configuration.
 
-System mode requires `VLLM_CPP_ROOT`, whose prefix must contain `include/vllm.h` plus a `lib` or `lib64` directory. `VLLM_CPP_LIB_DIR` can override the vllm library directory. Consumer builds validate that the selected system header exists but do not compare its layout. The maintainer integration test compiles its C probe at test runtime against that header, compares its C layouts with the generated Rust declarations, and the runtime test requires ABI version 10.
+System mode requires `VLLM_CPP_ROOT`, whose prefix must contain `include/vllm.h` plus a `lib` or `lib64` directory. `VLLM_CPP_LIB_DIR` can override the vllm library directory. Consumer builds validate that the selected system header exists but do not compare its layout. The maintainer integration test compiles its C probe at test runtime against that header, compares its C layouts with the generated Rust declarations, and the runtime test requires ABI version 17.
 
 Upstream's normal CMake install provides `libvllm` and `vllm.h` but does not install the private `libblake3_vendored.a` target. A stock install therefore works directly with `system,dynamic-link`. System static mode requires callers to provision the matching `libblake3_vendored.a` separately and set `VLLM_CPP_BLAKE3_LIB_DIR`; when the variable is unset, the build script checks the selected vllm library directory for backward compatibility. It does not search arbitrary build trees.
 
@@ -41,7 +41,7 @@ These features do not claim runtime support. Known native blockers remain: a CUD
 
 ## Generated Bindings
 
-The bundled source is pinned to commit `34aedfbe8ed9779697905541a62e2160ccfd9c05` and exposes C ABI version 10. Bindings are generated with bindgen 0.72.1 from `wrapper.h`, which includes `vllm.cpp/include/vllm.h`, and committed to `src/bindings.rs`. The exported stable C boundary is narrower than the broader native C++ implementation; these declarations do not promise access to undocumented internals. Maintainers use Just 1.40 or newer from the repository root:
+The bundled source is pinned to vllm.cpp `v0.0.2` at commit `7020de93652ca920424a10ac5255b34810dd2f24` and exposes C ABI version 17. Bindings are generated with bindgen 0.72.1 from `wrapper.h`, which includes `vllm.cpp/include/vllm.h`, and committed to `src/bindings.rs`. The exported stable C boundary is narrower than the broader native C++ implementation; these declarations do not promise access to undocumented internals. Maintainers use Just 1.40 or newer from the repository root:
 
 ```console
 just bindings
@@ -49,7 +49,7 @@ just sys
 just link-modes
 ```
 
-The conformance gate verifies the generated output, C and C++ header compatibility, C/Rust layout, the exact 19-symbol export set, pure backend plans/cache parsing, Apple/MLX validation and link ordering, pinned CUDA architecture mappings, Triton AOT drift, and compile-time/runtime ABI 10. CI separately runs bundled static/dynamic and fixture-backed system static/dynamic CPU tests; dynamic tests set the required loader path. `build.rs` only performs consumer native build/link integration and does not compile or execute the layout probe. `tests/layout.rs` compiles and executes `tests/layout.c` with the bundled header or `VLLM_CPP_ROOT/include/vllm.h` at test runtime using the Rust standard library. Native Linux CPU is the supported runtime target; cross-compiling that integration test is unsupported.
+The conformance gate verifies the generated output, C and C++ header compatibility, C/Rust layout, the exact 35-symbol export set, pure backend plans/cache parsing, Apple/MLX validation and link ordering, pinned CUDA architecture mappings, Triton AOT drift, and compile-time/runtime ABI 17. CI separately runs bundled static/dynamic and fixture-backed system static/dynamic CPU tests; dynamic tests set the required loader path. `build.rs` only performs consumer native build/link integration and does not compile or execute the layout probe. `tests/layout.rs` compiles and executes `tests/layout.c` with the bundled header or `VLLM_CPP_ROOT/include/vllm.h` at test runtime using the Rust standard library. Native Linux CPU is the supported runtime target; cross-compiling that integration test is unsupported.
 
 The Rust crate is dual-licensed under MIT or Apache-2.0. The bundled vllm.cpp source retains its upstream Apache-2.0 license and notices.
 
