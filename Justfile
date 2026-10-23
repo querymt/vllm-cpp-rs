@@ -344,6 +344,10 @@ _link-modes crate_root target_base:
 
     echo 'all four Linux CPU link modes passed'
 
+# Run all locked model-free workspace targets.
+test:
+    env -u VLLM_CPP_TEST_MODEL cargo test --locked --workspace --all-targets --features vllm-cpp/serde
+
 # Check locked model-free targets on the exact Rust 1.85.0 toolchain.
 msrv:
     #!/usr/bin/env bash
@@ -870,6 +874,45 @@ package-test:
     printf 'safe package: %d entries, %d bytes unpacked, %d bytes compressed\n' \
       "$safe_entry_count" "$safe_unpacked_size" "$safe_package_size"
 
+# Build and run the focused native CPU C API fixture gate.
+native-capi:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{ quote(root) }}
+    command -v python3 >/dev/null || {
+      echo 'python3 is required for native C API fixture configuration' >&2
+      exit 1
+    }
+    target_base=${CARGO_TARGET_DIR:-{{ quote(root + "/target") }}}
+    mkdir -p "$target_base"
+    target_base=$(cd "$target_base" && pwd -P)
+    build="$target_base/native-capi"
+    cmake -S vllm-cpp-sys/vllm.cpp -B "$build" -G "$CMAKE_GENERATOR" \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DVLLM_CPP_BUILD_TESTS=ON -DVLLM_CPP_BUILD_EXAMPLES=OFF \
+      -DVLLM_CPP_SERVER=OFF -DVLLM_CPP_HIP=OFF \
+      -DVLLM_CPP_TENSTORRENT=OFF -DVLLM_CPP_LITERAL_STATIC=OFF \
+      -DVLLM_CPP_BENCH_PROFILE_CONTROL=OFF -DVLLM_CPP_NCCL=OFF \
+      -DVLLM_CPP_MARLIN=ON -DVLLM_CPP_FLASH_ATTN=ON \
+      -DVLLM_CPP_CUDA=OFF -DVLLM_CPP_METAL=OFF \
+      -DVLLM_CPP_MLX=OFF -DVLLM_CPP_VULKAN=OFF \
+      -DVLLM_CPP_TRITON=OFF -DVLLM_CPP_TRITON_REGEN=OFF \
+      -DVLLM_CPP_TRITON_VENDORED_ARCH= \
+      -DVLLM_CPP_TRITON_TARGET= -DVLLM_CPP_CUTLASS_FETCH=OFF \
+      -DVLLM_CPP_SANITIZE=OFF
+    cmake --build "$build" --target test_capi
+
+    listing=$(mktemp)
+    output=$(mktemp)
+    trap 'rm -f "$listing" "$output"' EXIT
+    ctest --test-dir "$build" -N --tests-regex '^test_capi$' | tee "$listing"
+    test_count=$(grep -Ec '^[[:space:]]*Test #[0-9]+: test_capi$' "$listing")
+    [[ $test_count -eq 1 ]]
+    grep -Fxq 'Total Tests: 1' "$listing"
+    ctest --test-dir "$build" --output-on-failure --tests-regex '^test_capi$' \
+      | tee "$output"
+    grep -Fxq '100% tests passed, 0 tests failed out of 1' "$output"
+
 # Run sys-first crates.io publication checks without uploading.
 publish-dry-run:
     #!/usr/bin/env bash
@@ -886,6 +929,155 @@ setup-test-model:
     set -euo pipefail
     cd {{ quote(root) }}
     cargo run --quiet --locked -p vllm-cpp --example setup_test_model
+
+# Run model-free ownership and FFI tests with ASan, UBSan, and leak detection.
+sanitizers-model-free:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{ quote(root) }}
+    command -v python3 >/dev/null || {
+      echo 'python3 is required for sanitizer test discovery and native fixture configuration' >&2
+      exit 1
+    }
+    fixtures={{ quote(root + "/vllm-cpp-sys/vllm.cpp/tests/vllm/models/fixtures") }}
+    for fixture in parakeet_e2e llama_embed_e2e minimax_h3_video_fold; do
+      if [[ ! -d $fixtures/$fixture ]]; then
+        echo "required sanitizer fixture directory is missing: $fixtures/$fixture" >&2
+        exit 1
+      fi
+    done
+    for anchor in \
+      parakeet_e2e/audio.wav \
+      parakeet_e2e/ctc/config.json \
+      parakeet_e2e/ctc/model.safetensors \
+      parakeet_e2e/ctc/tokenizer.json \
+      llama_embed_e2e/config.json \
+      llama_embed_e2e/model.safetensors \
+      llama_embed_e2e/tokenizer.json \
+      minimax_h3_video_fold/golden_mux_argv.txt \
+      minimax_h3_video_fold/golden_mux_argv_silent.txt; do
+      if [[ ! -s $fixtures/$anchor ]]; then
+        echo "required sanitizer fixture anchor is missing or empty: $fixtures/$anchor" >&2
+        exit 1
+      fi
+    done
+    unset VLLM_CPP_TEST_MODEL
+    export VLLM_CPP_SANITIZE=address,undefined
+    export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-{{ quote(root + "/target/sanitize-model-free") }}}
+
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    messages="$work/messages.json"
+    cargo test --locked -p vllm-cpp --lib --test safe_api --test qwen3 \
+      --no-run --message-format=json > "$messages"
+
+    test_binary() {
+      local target=$1
+      python3 - "$messages" "$target" <<'PY'
+    import json
+    import sys
+
+    messages, target = sys.argv[1:]
+    matches = []
+    with open(messages, encoding="utf-8") as stream:
+        for line in stream:
+            message = json.loads(line)
+            if (
+                message.get("reason") == "compiler-artifact"
+                and message.get("profile", {}).get("test")
+                and message.get("target", {}).get("name") == target
+                and message.get("executable")
+            ):
+                matches.append(message["executable"])
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected exactly one test binary for {target}, found {len(matches)}: {matches}"
+        )
+    print(matches[0])
+    PY
+    }
+
+    assert_complete_suite() {
+      local suite=$1
+      local output=$2
+      python3 - "$output" "$suite" <<'PY'
+    import re
+    import sys
+
+    output, suite = sys.argv[1:]
+    text = open(output, encoding="utf-8", errors="replace").read()
+    running = re.findall(r"^running ([0-9]+) tests?$", text, re.MULTILINE)
+    summaries = re.findall(
+        r"^test result: ok\. ([0-9]+) passed; 0 failed;", text, re.MULTILINE
+    )
+    if len(running) != 1 or int(running[0]) < 1:
+        raise SystemExit(
+            f"{suite} suite did not report exactly one nonzero running count: {running}"
+        )
+    if len(summaries) != 1 or int(summaries[0]) < 1:
+        raise SystemExit(
+            f"{suite} suite did not report exactly one successful nonzero summary: {summaries}"
+        )
+    PY
+    }
+
+    assert_focused_test() {
+      local test=$1
+      local output=$2
+      python3 - "$output" "$test" <<'PY'
+    import re
+    import sys
+
+    output, test = sys.argv[1:]
+    text = open(output, encoding="utf-8", errors="replace").read()
+    running = re.findall(r"^running ([0-9]+) tests?$", text, re.MULTILINE)
+    summaries = re.findall(
+        r"^test result: ok\. ([0-9]+) passed; ([0-9]+) failed;", text, re.MULTILINE
+    )
+    if running != ["1"]:
+        raise SystemExit(f"{test} did not report exactly one running test: {running}")
+    if summaries != [("1", "0")]:
+        raise SystemExit(f"{test} did not report exactly one passed test: {summaries}")
+    PY
+    }
+
+    library=$(test_binary vllm_cpp)
+    safe_api=$(test_binary safe_api)
+    qwen3=$(test_binary qwen3)
+    for binary in "$library" "$safe_api" "$qwen3"; do
+      [[ -x $binary ]] || {
+        echo "test binary is not executable: $binary" >&2
+        exit 1
+      }
+    done
+
+    asan=$(gcc -print-file-name=libasan.so)
+    ubsan=$(gcc -print-file-name=libubsan.so)
+    if [[ ! -f $asan || ! -f $ubsan ]]; then
+      echo 'GCC sanitizer runtimes are unavailable' >&2
+      exit 1
+    fi
+    export LD_PRELOAD="$asan:$ubsan${LD_PRELOAD:+:$LD_PRELOAD}"
+    export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1}
+    export UBSAN_OPTIONS=${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}
+    export VT_POOL_BYPASS=1
+
+    library_output="$work/library.out"
+    "$library" --test-threads=1 2>&1 | tee "$library_output"
+    assert_complete_suite library "$library_output"
+    safe_api_output="$work/safe-api.out"
+    "$safe_api" --test-threads=1 2>&1 | tee "$safe_api_output"
+    assert_complete_suite safe_api "$safe_api_output"
+    for test in \
+      committed_transcription_fixture_supports_path_pcm_and_wrong_task \
+      committed_embedding_fixture_preserves_shape_order_ownership_and_wrong_task \
+      committed_video_mux_goldens_preserve_exact_argument_boundaries \
+      committed_parakeet_directory_is_rejected_as_video_dit; do
+      output="$work/$test.out"
+      "$qwen3" --test-threads=1 --exact "$test" 2>&1 | tee "$output"
+      assert_focused_test "$test" "$output"
+    done
+    echo 'sanitizer gate passed: 3 binaries, 2 complete suites, 4 focused fixture tests'
 
 # Run the full safe/request/model suites with ASan, UBSan, and leak detection.
 sanitizers model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
@@ -999,4 +1191,4 @@ docs:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --features vllm-cpp/serde
 
 # Run the complete maintainer gate serially; do not pass --jobs.
-ci: fmt-check lint docs sys link-modes package-test
+ci: fmt-check lint docs test sys link-modes native-capi sanitizers-model-free package-test publish-dry-run
