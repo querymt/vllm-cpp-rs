@@ -7,11 +7,11 @@ Rust bindings for [vllm.cpp](https://github.com/mudler/vllm.cpp), organized as:
 
 ## Status
 
-> **Work in progress:** these bindings track a pinned vllm.cpp revision and are still catching up with upstream development. APIs, supported features, and backend behavior may lag behind the latest vllm.cpp release; check the pinned commit and compatibility notes before adopting them.
+> **Work in progress:** these bindings track a pinned vllm.cpp release and may lag later upstream APIs or backend behavior. Check the exact native identity and support boundary before adoption.
 
-The safe crate provides a cloneable engine API for local model loading, blocking completion and streaming, non-blocking concurrent requests, structured output, and raw-JSON chat. It also provides an always-available synchronous Hugging Face resolver for standalone GGUF files and runtime-complete sparse Safetensors snapshots, plus a Clap-based interactive chat example using those APIs. An optional `serde` feature adds `serde_json::Value` chat helpers. The sys crate provides checked-in generated FFI declarations with C/Rust layout checks and coverage for all 19 exported C symbols.
+The safe crate covers text completion, streaming, raw-JSON and optional serde chat, concurrent requests, structured output, custom logits processing, pre-tokenized completion, transcription, embeddings, video generation, and standalone video-mux argument composition. It also includes a synchronous Hugging Face resolver and text-focused examples. The sys crate exposes the complete 35-function stable C boundary at ABI 17 with checked-in generated bindings and C/Rust conformance checks.
 
-Linux x86_64 CPU builds support bundled static, bundled dynamic, system static, and system dynamic linking. Bundled CPU builds also target Linux aarch64 and Apple ARM64. Experimental bundled builds expose Linux x86_64/aarch64 build configuration for CUDA, external CUTLASS, Triton AOT, and Vulkan, plus Apple ARM64 Metal and external MLX configuration. Accelerator features are build integration surfaces, not runtime-support claims. vllm.cpp is pinned at `34aedfbe8ed9779697905541a62e2160ccfd9c05`, which exposes C ABI version 10.
+The native source is independently pinned to vllm.cpp tag `v0.0.2`, commit `7020de93652ca920424a10ac5255b34810dd2f24`. Native Linux x86_64 CPU is the supported runtime target, including bundled/system and static/dynamic linking. Linux ARM64, Apple ARM64, CUDA, external CUTLASS, Triton AOT, Vulkan, Metal, and external MLX are configured build or optional validation surfaces; they are not accelerator runtime-support claims.
 
 ## Prerequisites
 
@@ -43,17 +43,21 @@ git submodule update --init --recursive
 
 ## Safe API
 
-The packaged [`vllm-cpp` guide](vllm-cpp/README.md) covers local and Hugging Face model resolution, safe ownership, callbacks, concurrency, features, link modes, and deployment. The [`vllm-cpp-sys` guide](vllm-cpp-sys/README.md) documents the raw ABI and native build boundary.
+The packaged [`vllm-cpp` guide](vllm-cpp/README.md) covers the full API, ownership, callbacks, filesystem effects, link modes, and deployment. The [`vllm-cpp-sys` guide](vllm-cpp-sys/README.md) documents the unsafe ABI and native build boundary.
 
-`Engine::load` accepts a native-compatible model directory or standalone GGUF. `HuggingFaceModel` synchronously resolves into the normal Hugging Face cache before engine construction, defaulting to the Hub's mutable `main` revision; `.revision(...)` can pin a branch, tag, or commit. GGUF mode selects one safe root file. Safetensors mode pins downloads to repository metadata's commit SHA and retrieves only native runtime requirements: root configuration/tokenizer files and either unsharded weights or an index plus all root shards. Every inference example accepts a bare or explicit local path and both Hub artifact forms with optional `--revision`. Cached downloads are reused. Retrieval does not prove model/backend compatibility.
+`Engine::load` accepts a native-compatible model directory or standalone GGUF. `HuggingFaceModel` synchronously resolves a GGUF or runtime-complete sparse Safetensors snapshot into the normal cache; retrieval does not prove native model, task, or backend compatibility.
 
-`EngineBuilder` owns model settings and converts them to temporary C strings only for the load call. `SamplingParams` owns stop strings, structured constraints, and optional `Send + Sync` custom logits processors. Processor panics are contained before the C boundary and reported through Rust errors; processor-backed generation must be bounded because ABI v10 has no callback abort channel. Processor state remains registered only through the blocking call or asynchronous request lifetime; stale native invocations after cleanup become no-ops. `version()` copies the linked native diagnostic version string. Completion and chat strings are copied into Rust values before the matching native free function runs.
+Text `Engine` is a cloneable `Send + Sync` RAII owner. It provides blocking completion, streaming, chat, structured output, custom logits processing, and `complete_tokens`, plus non-blocking `Request` submission. Requests retain an `Arc` to the engine, are `Send` but not `Sync`, and expose completion probes, cancellation, waiting, and copied diagnostics. Callback panics are contained before crossing C; asynchronous callbacks run on a native delivery thread, and callback-thread wait/free is rejected or deferred under the stable lifecycle contract.
 
-`Engine` is `Clone + Send + Sync`; each `Request` retains the shared engine until native callback delivery has joined. A request is `Send` but deliberately not `Sync`. `submit` returns before generation finishes, and `Request` provides `is_done`, idempotent `cancel`, `wait`, and copied `native_error` diagnostics. `wait` classifies completion as `Completed`, `StoppedByCallback`, or `Cancelled`; an explicit asynchronous `Stop` is classified as `StoppedByCallback` even when returned for the terminal event.
+`EngineBuilder` starts from `vllm_model_params_default()` and overlays only explicitly selected settings, preserving native helper defaults such as `block_size=32`, `max_num_seqs=32`, and `gpu_memory_utilization=0.92`. Text/task [`Device`](vllm-cpp/src/params.rs) numbering is `Auto=0`, `Cpu=1`, and `Cuda=2`; explicit CUDA never silently falls back. KV sizing precedence is `num_blocks` over `kv_cache_memory_bytes` over `gpu_memory_utilization` and its native profile/fallback path.
 
-All streaming callbacks receive copied UTF-8 deltas. Blocking callbacks may borrow stack data; their panics are caught before the C boundary and resumed only after the native call returns. Asynchronous callbacks must be `Send + 'static`, run on a native delivery thread, and report panic as `Error::CallbackPanicked` from `wait`. Waiting for or freeing a request from its own callback thread is prohibited by ABI v10: `wait` returns `Error::RequestCallbackThread`, while drop transfers cleanup to a prestarted reaper that owns the request, callback, and engine until native free/cancel/join completes. Chat methods accept raw OpenAI-compatible request JSON; enable `serde` for `serde_json::Value` request and response helpers. `SchedulerPolicy::Priority` selects the native queue. Raw and serde chat request JSON can carry a `priority` field that the native OpenAI-compatible path parses and submits. Direct completion, completion streaming, and `Request` submissions currently default to priority zero and tie by arrival; caller-selected priorities for those direct APIs require a future C ABI/API change.
+`complete_tokens` borrows caller-provided token IDs for one blocking call. Its output capacity limits only reported/copied IDs, not native generation; `truncated` compares the copied count with native completion metadata. `include_completion = false` suppresses the Rust metadata copy, while the hidden native metadata request still occurs so truncation remains accurate.
 
-See [the examples guide](vllm-cpp/examples/README.md) for ordinary Linux and optional Nix setup, commands for every example, and the interactive chat CLI's local/Hub model forms and generation options. Release-facing changes are recorded in the [changelog](CHANGELOG.md), and maintainers use the manual [release process](RELEASING.md).
+`TranscriptionEngine` and `EmbeddingEngine` are separate, non-cloneable, conservatively thread-local RAII owners. Their operations take `&mut self`, block, borrow call inputs, and copy results into Rust-owned values; embeddings are row-major and preserve input order. ABI 17 has no task-introspection function, so none of the task-specific owners can prove a checkpoint's task at load time. Native wrong-task `InvalidArgument` diagnostics remain authoritative.
+
+`VideoEngine` separately owns a MiniMax-H3 checkpoint set and performs exclusive blocking generation. Video device numbering is `Cpu=0` and `Cuda=1`, with no `Auto`; explicit CUDA never falls back. Generation writes frame/audio artifacts, may leave stale or partial output, and trusts caller paths without sandboxing. `VideoMuxParams` and `VideoMuxArgv` only compose ordered `OsString` argument boundaries. This crate never executes ffmpeg, an HTTP server, or another process; `vllm_server_main` remains available only through the raw crate.
+
+The high-level crate intentionally adds no tokenizer, task-query, raw-handle, process-execution, or HTTP-server wrapper. See [the examples guide](vllm-cpp/examples/README.md) for the intentionally text-focused binaries. Release-facing changes are recorded in the [changelog](CHANGELOG.md), and maintainers use the manual [release process](RELEASING.md).
 
 ## Build and Test
 
@@ -72,59 +76,41 @@ Set `CMAKE_BUILD_PARALLEL_LEVEL` to control native parallelism. The default bund
 
 ## Experimental Backend Builds
 
-Backend features are bundled-only and mutually exclusive with `system`; CUDA and Vulkan are also mutually exclusive. CUDA/CUTLASS/Triton/Vulkan target Linux x86_64/aarch64, while Metal/MLX require exact `aarch64-apple-darwin`. Backend features do not enable `bundled`: normal default-feature commands may use `--features cuda`, while `--no-default-features` callers must include it explicitly, for example `--features bundled,cuda`. Use a fresh `CARGO_TARGET_DIR` for every backend and link mode.
+Backend features are bundled-only and mutually exclusive with `system`; CUDA and Vulkan also conflict. CUDA/CUTLASS/Triton/Vulkan target Linux x86_64/aarch64, while Metal/MLX require exact `aarch64-apple-darwin`. Features do not imply runtime support and do not enable `bundled` for `--no-default-features` callers. Use a fresh `CARGO_TARGET_DIR` for each backend/link combination.
 
-- `cuda` requires `VLLM_CPP_CUDA_ARCHITECTURES` equal to `80`, `86`, `87`, `89`, `90a`, `100a`, `103a`, `110`, `120a`, `121a`, or `120a;121a`. Leave this variable unset when `cuda` is disabled, including CPU and system builds.
-- `cuda-cutlass` implies `cuda`, requires an explicit canonical `VLLM_CPP_CUTLASS_DIR` containing CUTLASS >=4.5.0, disables fetching, and rejects `103a` and `110`. Plain CUDA uses a nonexistent sentinel CUTLASS root so an ambient checkout cannot alter the build.
-- `triton-aot` implies `cuda`, enables only checked-in AOT artifacts for one of `80`, `86`, `89`, `90a`, `100a`, or `121a`, and forces regeneration off.
-- `vulkan` uses packaged Khronos headers and checked-in SPIR-V. It does not link a Vulkan SDK library; the native library opens the runtime loader dynamically.
-- `metal` enables the native Metal backend on Apple ARM64 and links Apple's `Metal` and `Foundation` frameworks. Its MSL is compiled at runtime.
-- `mlx` implies `metal` and requires canonical `MLX_ROOT` containing `include/mlx/array.h`, `lib/libmlx.dylib`, and `lib/mlx.metallib`. MLX remains an external dependency: Cargo neither fetches nor packages it and emits no machine-local rpath.
+- `cuda` requires `VLLM_CPP_CUDA_ARCHITECTURES` equal to `80`, `86`, `87`, `89`, `90a`, `100a`, `103a`, `110`, `120a`, `121a`, or `120a;121a`.
+- `cuda-cutlass` requires caller-provided CUTLASS >=4.5.0, disables fetching, and rejects `103a` and `110`.
+- `triton-aot` packages and embeds all six checked-in AOT trees: `sm_80`, `sm_86`, `sm_89`, `sm_90a`, `sm_100a`, and `sm_121a`. Runtime dispatch selects only an exact SM match; other accepted CUDA targets, including `87`, `103a`, `110`, and `120a`, retain the portable C++/CUDA fallback. Regeneration remains disabled for consumer builds.
+- `vulkan` uses packaged headers and SPIR-V and opens the runtime loader dynamically.
+- `metal` links the Apple Metal and Foundation frameworks on Apple ARM64.
+- `mlx` implies `metal` and requires an external `MLX_ROOT`; Cargo neither fetches nor packages MLX and emits no machine-local rpath.
 
-For example:
+A configuration example, not candidate runtime evidence:
 
 ```console
 nix develop .#cuda
-VLLM_CPP_CUDA_ARCHITECTURES=120a \
+VLLM_CPP_CUDA_ARCHITECTURES=80 \
   CARGO_TARGET_DIR=target/cuda-static \
   cargo build --locked --release --features cuda
-VLLM_CPP_CUDA_ARCHITECTURES=120a \
-  CARGO_TARGET_DIR=target/cuda-dynamic \
-  cargo build --locked --release --features cuda,dynamic-link
-
-nix develop .#vulkan
-CARGO_TARGET_DIR=target/vulkan-static cargo build --locked --release --features vulkan
-
-# Apple ARM64 only
-CARGO_TARGET_DIR=target/metal-static cargo build --locked --release --features metal
-MLX_ROOT=/absolute/path/to/mlx CARGO_TARGET_DIR=target/mlx-static \
-  cargo build --locked --release --features mlx
 ```
 
-Static CUDA links the exact `cudart`, `cublasLt`, and, for Triton, CUDA driver locations selected by CMake. Static Apple builds link `libc++`; Metal adds the `Metal` and `Foundation` frameworks, while MLX adds its canonical `lib` search path before `dylib=mlx`. Dynamic builds rely on the shared native library's transitive dependencies instead of repeating them through Cargo. Deploy `libvllm.so`/`libvllm.dylib` and optional toolkit/MLX libraries through normal loader paths.
+Static CUDA links toolkit libraries selected by CMake. Static Apple builds link `libc++` and the selected frameworks/providers. Dynamic builds rely on the native shared library's transitive dependencies. Deploy `libvllm.so`/`libvllm.dylib` and optional toolkit/MLX libraries through normal loader paths.
 
-Compilation does not establish runtime correctness. Known native evidence blockers remain: CUDA teardown can SIGSEGV after otherwise successful tests; CUDA bf16 testing has a numerical tolerance failure; CUTLASS concurrent output differs from the non-concurrent path; Vulkan attention/model runtime is incomplete; and MLX is an external, numerically distinct provider without release-lane model evidence. No accelerator runtime support is claimed here.
+Compilation does not establish runtime correctness. CUDA/CUTLASS/Triton, Vulkan, Metal, and MLX remain experimental build surfaces; no accelerator runtime support is claimed.
 
-## Test Model and Sanitizers
+## Optional Model and Sanitizer Recipes
 
-Model-backed tests use Apache-2.0 `Qwen/Qwen3-0.6B` at pinned revision `c1899de289a04d12100db370d81485cdf75e47ca`. Explicitly resolve its complete Safetensors snapshot into the standard Hugging Face cache, then run exactly 18 blocking and request-lifecycle model tests serially, including choice and JSON-Schema structured-output enforcement:
+The required Linux x86_64 CPU candidate gate is model-free and uses committed native fixtures. An optional prepared-model lane uses Apache-2.0 `Qwen/Qwen3-0.6B` at revision `c1899de289a04d12100db370d81485cdf75e47ca`; the model is never included in repository or crate packages. No ordinary test or instrumentation recipe downloads a model implicitly.
 
 ```console
 model=$(just setup-test-model)
 VLLM_CPP_TEST_MODEL="$model" \
   cargo test --locked -p vllm-cpp --release --test qwen3 -- --test-threads=1
-```
-
-`just setup-test-model` is the only explicit test-fixture acquisition step. It uses `HuggingFaceModel` with the immutable revision above, honors normal `HF_HOME` and Hugging Face authentication, reuses the standard cache, and prints the resolved directory. The approximately 1.5 GB model is not included in repository or crate packages. Ordinary tests, sanitizers, and TSan never resolve or download models: `VLLM_CPP_TEST_MODEL` must name an externally prepared model directory. Model-backed tests skip with an explanatory message when it is unset; when set, tests and instrumentation recipes require it to be a directory.
-
-AddressSanitizer, UndefinedBehaviorSanitizer, and leak detection run the full safe/request/model suites with native instrumentation. The Linux x86_64 GCC ThreadSanitizer lane runs selected request lifecycle tests individually and instruments native C++ only; it does not claim race coverage for Rust or the Rust standard library. Callback-thread self-drop remains in the normal and ASan/leak suites because its handoff uses uninstrumented Rust synchronization.
-
-```console
 just sanitizers "$model"
 just tsan "$model"
 ```
 
-`VLLM_CPP_SANITIZE` is a bundled-build test input. System mode rejects it because Cargo cannot infer whether an externally built native library carries matching instrumentation.
+These commands are optional evidence and are recorded only when rerun against the exact candidate. The TSan recipe instruments native C++ only and does not claim Rust standard-library race coverage. `VLLM_CPP_SANITIZE` is a bundled-build test input; system mode rejects it.
 
 ## Link Modes
 
@@ -149,13 +135,15 @@ The package gate validates deterministic inventories for both crates, package me
 
 `just publish-dry-run` performs a sys-then-safe workspace packaging dry-run without uploading; it uses `--no-verify` to avoid the pre-publication registry cycle. As required by [RELEASING.md](RELEASING.md), after `vllm-cpp-sys` is available from crates.io, run the full `cargo publish -p vllm-cpp --locked --dry-run` verification before publishing the safe crate.
 
-## Platform and Backend Validation
+## Validation Boundary
 
-The manual `platforms` workflow provides exact Rust 1.85.0, Linux ARM64 CPU, Apple ARM64 CPU, Apple ARM64 Metal compile/link, and Mesa llvmpipe Vulkan jobs without duplicating ordinary Linux x86_64 CPU CI. The Vulkan job requires a real llvmpipe device and `storageBuffer16BitAccess`, then runs native backend/op gates; its scope is backend/op checking, not attention or model-inference support. The hosted Metal job checks compile/link only, not runtime correctness.
+Mandatory candidate evidence is Linux x86_64 CPU and model-free: formatting, lint, docs, workspace tests, generated-binding/header/layout/signature/ABI/exact-export checks, all four CPU link modes, native C API fixtures, ASan/UBSan/leak checks over committed fixtures, package extraction/downstream checks, publication dry-run, and exact MSRV validation.
+
+Prepared Qwen inference/sanitizers, native-only TSan, successful Rust MiniMax-H3 generation, Miri, Linux ARM64, Apple ARM64, Vulkan, CUDA/CUTLASS/Triton, Metal/MLX, and accelerator runtime are optional or deferred lanes. The manual platform workflows are configuration, not exact-candidate evidence unless separately dispatched and recorded.
 
 ## Support
 
-The supported runtime target is native Linux x86_64 CPU. Maintainer tests cover the four bundled/system static/dynamic CPU link modes plus bundled blocking and concurrent request inference with the pinned Qwen fixture. Sanitizer evidence covers native ASan/UBSan/leak detection and selected native-only GCC TSan lifecycle paths as described above. The manual Linux ARM64 and Apple ARM64 CPU jobs are configured for model-free build/test coverage. CUDA/CUTLASS/Triton/Vulkan/Metal/MLX remain experimental surfaces with the evidence boundaries and limitations listed above; CPU is the only supported runtime family.
+Native Linux x86_64 CPU is the supported runtime family. All accelerator features remain experimental build/configuration surfaces. Cross-platform compile or workflow configuration alone does not establish runtime support.
 
 ## Licensing and Affiliation
 
