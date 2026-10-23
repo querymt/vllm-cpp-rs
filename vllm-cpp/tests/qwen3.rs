@@ -5,9 +5,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use vllm_cpp::{
-    compose_video_mux_argv, EmbeddingEngine, Engine, Error, FinishReason, Request, RequestOutcome,
-    SamplingParams, StreamControl, StructuredOutput, TranscriptionEngine, TranscriptionInput,
-    VideoEngine, VideoMuxParams,
+    compose_video_mux_argv, Device, EmbeddingEngine, Engine, Error, FinishReason, Request,
+    RequestOutcome, SamplingParams, StreamControl, StructuredOutput, TranscriptionEngine,
+    TranscriptionInput, VideoEngine, VideoMuxParams,
 };
 
 fn model_path() -> Option<PathBuf> {
@@ -72,24 +72,317 @@ fn native_fixture(relative: &str) -> Option<PathBuf> {
     }
 }
 
-fn read_pcm16_mono_wav(path: &Path) -> Vec<f32> {
-    let bytes = std::fs::read(path).expect("read fixture WAV");
-    assert_eq!(&bytes[0..4], b"RIFF");
-    assert_eq!(&bytes[8..12], b"WAVE");
-    let mut offset = 12;
-    while offset + 8 <= bytes.len() {
-        let name = &bytes[offset..offset + 4];
-        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        let start = offset + 8;
-        if name == b"data" {
-            return bytes[start..start + size]
-                .chunks_exact(2)
-                .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0)
-                .collect();
-        }
-        offset = start + size + (size % 2);
+#[derive(Debug, PartialEq)]
+struct FixtureWav {
+    samples: Vec<f32>,
+    sample_rate: u32,
+}
+
+fn decode_pcm16_mono_wav(bytes: &[u8]) -> Result<FixtureWav, String> {
+    if bytes.len() < 12 {
+        return Err("truncated RIFF/WAVE header".to_owned());
     }
-    panic!("fixture WAV has no data chunk");
+    if &bytes[..4] != b"RIFF" {
+        return Err("missing RIFF identifier".to_owned());
+    }
+    if &bytes[8..12] != b"WAVE" {
+        return Err("missing WAVE identifier".to_owned());
+    }
+
+    let riff_size = usize::try_from(u32::from_le_bytes(
+        bytes[4..8]
+            .try_into()
+            .map_err(|_| "truncated RIFF size".to_owned())?,
+    ))
+    .map_err(|_| "RIFF size exceeds address space".to_owned())?;
+    let riff_end = 8usize
+        .checked_add(riff_size)
+        .ok_or_else(|| "RIFF size overflows address space".to_owned())?;
+    if riff_end < 12 {
+        return Err("RIFF size does not include the WAVE identifier".to_owned());
+    }
+    if riff_end > bytes.len() {
+        return Err("declared RIFF end exceeds input length".to_owned());
+    }
+    if riff_end != bytes.len() {
+        return Err("bytes remain after the declared RIFF end".to_owned());
+    }
+
+    let mut fmt = None;
+    let mut data = None;
+    let mut offset = 12usize;
+    while offset < riff_end {
+        let header_end = offset
+            .checked_add(8)
+            .ok_or_else(|| "chunk header offset overflows address space".to_owned())?;
+        if header_end > riff_end {
+            return Err(format!("truncated chunk header at byte {offset}"));
+        }
+        let name: [u8; 4] = bytes[offset..offset + 4]
+            .try_into()
+            .map_err(|_| format!("truncated chunk identifier at byte {offset}"))?;
+        let size = usize::try_from(u32::from_le_bytes(
+            bytes[offset + 4..header_end]
+                .try_into()
+                .map_err(|_| format!("truncated chunk size at byte {offset}"))?,
+        ))
+        .map_err(|_| format!("chunk length exceeds address space at byte {offset}"))?;
+        let body_end = header_end
+            .checked_add(size)
+            .ok_or_else(|| format!("chunk length overflows address space at byte {offset}"))?;
+        if body_end > riff_end {
+            return Err(format!("chunk length exceeds RIFF bounds at byte {offset}"));
+        }
+        let padded_end = body_end
+            .checked_add(size & 1)
+            .ok_or_else(|| format!("chunk padding overflows address space at byte {offset}"))?;
+        if padded_end > riff_end {
+            return Err(format!("missing padding byte for chunk at byte {offset}"));
+        }
+
+        match &name {
+            b"fmt " => {
+                if fmt.is_some() {
+                    return Err("duplicate fmt chunk".to_owned());
+                }
+                if size < 16 {
+                    return Err(format!("fmt chunk is too short: {size} bytes"));
+                }
+                let body = &bytes[header_end..body_end];
+                let format = u16::from_le_bytes([body[0], body[1]]);
+                let channels = u16::from_le_bytes([body[2], body[3]]);
+                let sample_rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+                let byte_rate = u32::from_le_bytes(body[8..12].try_into().unwrap());
+                let block_align = u16::from_le_bytes([body[12], body[13]]);
+                let bits_per_sample = u16::from_le_bytes([body[14], body[15]]);
+                if format != 1 {
+                    return Err(format!("WAV format code must be PCM 1, found {format}"));
+                }
+                if channels != 1 {
+                    return Err(format!("WAV must be mono, found {channels} channels"));
+                }
+                if sample_rate != 16_000 {
+                    return Err(format!(
+                        "WAV sample rate must be 16000, found {sample_rate}"
+                    ));
+                }
+                if bits_per_sample != 16 {
+                    return Err(format!(
+                        "WAV sample width must be 16 bits, found {bits_per_sample}"
+                    ));
+                }
+                if block_align != 2 {
+                    return Err(format!(
+                        "WAV block alignment must be 2, found {block_align}"
+                    ));
+                }
+                if byte_rate != 32_000 {
+                    return Err(format!("WAV byte rate must be 32000, found {byte_rate}"));
+                }
+                fmt = Some(sample_rate);
+            }
+            b"data" => {
+                if data.is_some() {
+                    return Err("duplicate data chunk".to_owned());
+                }
+                if size == 0 {
+                    return Err("WAV data chunk is empty".to_owned());
+                }
+                if size % 2 != 0 {
+                    return Err(format!("WAV data chunk has odd size {size}"));
+                }
+                data = Some((header_end, body_end));
+            }
+            _ => {}
+        }
+        offset = padded_end;
+    }
+
+    let sample_rate = fmt.ok_or_else(|| "missing fmt chunk".to_owned())?;
+    let (data_start, data_end) = data.ok_or_else(|| "missing data chunk".to_owned())?;
+    let samples = bytes[data_start..data_end]
+        .chunks_exact(2)
+        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0)
+        .collect();
+    Ok(FixtureWav {
+        samples,
+        sample_rate,
+    })
+}
+
+fn read_pcm16_mono_wav(path: &Path) -> Result<FixtureWav, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read fixture WAV {}: {error}", path.display()))?;
+    decode_pcm16_mono_wav(&bytes)
+}
+
+#[cfg(test)]
+fn fixture_fmt_chunk() -> Vec<u8> {
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&1u16.to_le_bytes());
+    fmt.extend_from_slice(&1u16.to_le_bytes());
+    fmt.extend_from_slice(&16_000u32.to_le_bytes());
+    fmt.extend_from_slice(&32_000u32.to_le_bytes());
+    fmt.extend_from_slice(&2u16.to_le_bytes());
+    fmt.extend_from_slice(&16u16.to_le_bytes());
+    fmt
+}
+
+#[cfg(test)]
+fn fixture_wav_bytes(chunks: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let mut body = b"WAVE".to_vec();
+    for (name, chunk) in chunks {
+        body.extend_from_slice(name);
+        body.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+        body.extend_from_slice(chunk);
+        if chunk.len() % 2 != 0 {
+            body.push(0);
+        }
+    }
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&body);
+    bytes
+}
+
+#[cfg(test)]
+fn assert_wav_error(bytes: &[u8], expected: &str) {
+    let error = decode_pcm16_mono_wav(bytes).expect_err("malformed WAV must fail");
+    assert!(
+        error.contains(expected),
+        "expected {expected:?} in WAV error {error:?}"
+    );
+}
+
+#[test]
+fn wav_parser_accepts_unknown_padding_and_data_before_fmt() {
+    let data = [i16::MIN.to_le_bytes(), 0i16.to_le_bytes()].concat();
+    let bytes = fixture_wav_bytes(&[
+        (*b"JUNK", vec![7]),
+        (*b"data", data),
+        (*b"fmt ", fixture_fmt_chunk()),
+    ]);
+    let wav = decode_pcm16_mono_wav(&bytes).expect("valid PCM fixture WAV");
+    assert_eq!(wav.sample_rate, 16_000);
+    assert_eq!(wav.samples, [-1.0, 0.0]);
+}
+
+#[test]
+fn wav_parser_rejects_identifiers_and_riff_bounds() {
+    assert_wav_error(&[], "truncated RIFF/WAVE header");
+
+    let valid = fixture_wav_bytes(&[(*b"fmt ", fixture_fmt_chunk()), (*b"data", vec![0, 0])]);
+    let mut wrong_riff = valid.clone();
+    wrong_riff[..4].copy_from_slice(b"RIFX");
+    assert_wav_error(&wrong_riff, "missing RIFF identifier");
+    let mut wrong_wave = valid.clone();
+    wrong_wave[8..12].copy_from_slice(b"WVAE");
+    assert_wav_error(&wrong_wave, "missing WAVE identifier");
+
+    let mut short_riff = valid.clone();
+    short_riff[4..8].copy_from_slice(&3u32.to_le_bytes());
+    assert_wav_error(
+        &short_riff,
+        "RIFF size does not include the WAVE identifier",
+    );
+
+    let mut truncated = valid.clone();
+    let declared = u32::from_le_bytes(truncated[4..8].try_into().unwrap());
+    truncated[4..8].copy_from_slice(&(declared + 1).to_le_bytes());
+    assert_wav_error(&truncated, "declared RIFF end exceeds input length");
+
+    let mut trailing = valid;
+    trailing.push(0);
+    assert_wav_error(&trailing, "bytes remain after the declared RIFF end");
+}
+
+#[test]
+fn wav_parser_rejects_truncated_chunks_and_padding() {
+    let mut header = b"RIFF".to_vec();
+    header.extend_from_slice(&7u32.to_le_bytes());
+    header.extend_from_slice(b"WAVEabc");
+    assert_wav_error(&header, "truncated chunk header");
+
+    let mut body = b"WAVEdata".to_vec();
+    body.extend_from_slice(&4u32.to_le_bytes());
+    body.extend_from_slice(&[0, 0]);
+    let mut truncated_body = b"RIFF".to_vec();
+    truncated_body.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    truncated_body.extend_from_slice(&body);
+    assert_wav_error(&truncated_body, "chunk length exceeds RIFF bounds");
+
+    let mut odd_body = b"WAVEJUNK".to_vec();
+    odd_body.extend_from_slice(&1u32.to_le_bytes());
+    odd_body.push(7);
+    let mut missing_padding = b"RIFF".to_vec();
+    missing_padding.extend_from_slice(&(odd_body.len() as u32).to_le_bytes());
+    missing_padding.extend_from_slice(&odd_body);
+    assert_wav_error(&missing_padding, "missing padding byte");
+
+    let mut huge_body = b"WAVEdata".to_vec();
+    huge_body.extend_from_slice(&u32::MAX.to_le_bytes());
+    let mut huge = b"RIFF".to_vec();
+    huge.extend_from_slice(&(huge_body.len() as u32).to_le_bytes());
+    huge.extend_from_slice(&huge_body);
+    assert_wav_error(&huge, "chunk length exceeds RIFF bounds");
+}
+
+#[test]
+fn wav_parser_rejects_invalid_format_metadata() {
+    let cases = [
+        (0usize, 3u16.to_le_bytes().to_vec(), "format code"),
+        (2, 2u16.to_le_bytes().to_vec(), "mono"),
+        (4, 8_000u32.to_le_bytes().to_vec(), "sample rate"),
+        (8, 16_000u32.to_le_bytes().to_vec(), "byte rate"),
+        (12, 4u16.to_le_bytes().to_vec(), "block alignment"),
+        (14, 8u16.to_le_bytes().to_vec(), "sample width"),
+    ];
+    for (offset, replacement, expected) in cases {
+        let mut fmt = fixture_fmt_chunk();
+        fmt[offset..offset + replacement.len()].copy_from_slice(&replacement);
+        let bytes = fixture_wav_bytes(&[(*b"fmt ", fmt), (*b"data", vec![0, 0])]);
+        assert_wav_error(&bytes, expected);
+    }
+
+    let short = fixture_wav_bytes(&[(*b"fmt ", vec![0; 15]), (*b"data", vec![0, 0])]);
+    assert_wav_error(&short, "fmt chunk is too short");
+}
+
+#[test]
+fn wav_parser_rejects_missing_duplicate_and_invalid_data_chunks() {
+    let fmt = fixture_fmt_chunk();
+    assert_wav_error(
+        &fixture_wav_bytes(&[(*b"data", vec![0, 0])]),
+        "missing fmt chunk",
+    );
+    assert_wav_error(
+        &fixture_wav_bytes(&[(*b"fmt ", fmt.clone())]),
+        "missing data chunk",
+    );
+    assert_wav_error(
+        &fixture_wav_bytes(&[
+            (*b"fmt ", fmt.clone()),
+            (*b"fmt ", fmt.clone()),
+            (*b"data", vec![0, 0]),
+        ]),
+        "duplicate fmt chunk",
+    );
+    assert_wav_error(
+        &fixture_wav_bytes(&[
+            (*b"fmt ", fmt.clone()),
+            (*b"data", vec![0, 0]),
+            (*b"data", vec![0, 0]),
+        ]),
+        "duplicate data chunk",
+    );
+    assert_wav_error(
+        &fixture_wav_bytes(&[(*b"fmt ", fmt.clone()), (*b"data", Vec::new())]),
+        "data chunk is empty",
+    );
+    assert_wav_error(
+        &fixture_wav_bytes(&[(*b"fmt ", fmt), (*b"data", vec![0])]),
+        "data chunk has odd size",
+    );
 }
 
 #[test]
@@ -163,18 +456,30 @@ fn committed_transcription_fixture_supports_path_pcm_and_wrong_task() {
     };
     let model = root.join("ctc");
     let wav = root.join("audio.wav");
-    let mut engine = TranscriptionEngine::load(&model).expect("load CTC fixture");
+    let mut engine = TranscriptionEngine::builder(&model)
+        .device(Device::Cpu)
+        .load()
+        .expect("load CTC fixture on CPU");
+    let cuda_error = TranscriptionEngine::builder(&model)
+        .device(Device::Cuda)
+        .load()
+        .err()
+        .expect("transcription fixture must refuse explicit CUDA");
+    assert!(
+        matches!(cuda_error, Error::InvalidArgument { .. }),
+        "{cuda_error:?}"
+    );
     let from_path = engine
         .transcribe(TranscriptionInput::WavFile(&wav))
         .expect("transcribe fixture path");
     assert_eq!(from_path.token_ids, [3, 4, 3]);
     assert_eq!(from_path.text.as_deref(), Some("atheat"));
 
-    let samples = read_pcm16_mono_wav(&wav);
+    let fixture = read_pcm16_mono_wav(&wav).expect("parse fixture WAV");
     let from_pcm = engine
         .transcribe(TranscriptionInput::Pcm {
-            samples: &samples,
-            sample_rate: 16_000,
+            samples: &fixture.samples,
+            sample_rate: fixture.sample_rate,
         })
         .expect("transcribe fixture PCM");
     assert_eq!(from_pcm, from_path);
@@ -200,7 +505,18 @@ fn committed_embedding_fixture_preserves_shape_order_ownership_and_wrong_task() 
     let Some(model) = native_fixture("llama_embed_e2e") else {
         return;
     };
-    let mut engine = EmbeddingEngine::load(&model).expect("load embedding fixture");
+    let mut engine = EmbeddingEngine::builder(&model)
+        .block_size(16)
+        .num_blocks(32)
+        .max_model_len(128)
+        .max_num_seqs(2)
+        .max_num_batched_tokens(128)
+        .prefix_caching(vllm_cpp::Toggle::Off)
+        .device(Device::Cpu)
+        .gpu_memory_utilization(1.25)
+        .kv_cache_memory_bytes(4096)
+        .load()
+        .expect("load configured embedding fixture");
     let result = engine
         .embed(["the quick brown fox", "the lazy dog"])
         .expect("embed fixture inputs");
