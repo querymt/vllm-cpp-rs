@@ -12,9 +12,36 @@ use std::thread::{self, ThreadId};
 
 use vllm_cpp_sys as ffi;
 
+use crate::abi::Compatibility;
 use crate::error::{invalid_configuration, Error};
 
 const NATIVE_DEFAULT_MAX_TOKENS: u32 = 16;
+
+/// Device selection for a text, transcription, or embedding engine.
+///
+/// [`Auto`](Self::Auto) preserves native platform selection. [`Cuda`](Self::Cuda)
+/// requires the CUDA platform; native loading fails rather than falling back to
+/// another device when CUDA is unavailable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Device {
+    /// Let vllm.cpp select the available platform.
+    #[default]
+    Auto,
+    /// Require the CPU platform.
+    Cpu,
+    /// Require the CUDA platform without fallback.
+    Cuda,
+}
+
+impl Device {
+    pub(crate) const fn as_native(self) -> i32 {
+        match self {
+            Self::Auto => 0,
+            Self::Cpu => 1,
+            Self::Cuda => 2,
+        }
+    }
+}
 
 /// Native scheduler admission order.
 ///
@@ -278,8 +305,11 @@ impl SamplingParams {
         self
     }
 
-    pub(crate) fn marshal(&self) -> Result<MarshaledSamplingParams, Error> {
-        MarshaledSamplingParams::new(self)
+    pub(crate) fn marshal(
+        &self,
+        compatibility: &Compatibility,
+    ) -> Result<MarshaledSamplingParams, Error> {
+        MarshaledSamplingParams::new(self, compatibility)
     }
 }
 
@@ -294,9 +324,8 @@ pub(crate) struct MarshaledSamplingParams {
 }
 
 impl MarshaledSamplingParams {
-    fn new(params: &SamplingParams) -> Result<Self, Error> {
-        // ABI equality is checked before this struct-returning call.
-        let mut raw = unsafe { ffi::vllm_sampling_params_default() };
+    fn new(params: &SamplingParams, compatibility: &Compatibility) -> Result<Self, Error> {
+        let mut raw = compatibility.sampling_params_default();
         raw.temperature = params.temperature;
         raw.top_p = params.top_p;
         raw.top_k = params.top_k;
@@ -611,10 +640,23 @@ fn length_to_i32(value: usize, field: &'static str) -> Result<i32, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{logits_processor_trampoline, SamplingParams};
+    use super::{logits_processor_trampoline, Device, SamplingParams};
+    use crate::abi::Compatibility;
     use crate::Error;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    fn compatibility() -> Compatibility {
+        Compatibility::check().expect("matching native ABI")
+    }
+
+    #[test]
+    fn maps_devices_to_native_values() {
+        assert_eq!(Device::default(), Device::Auto);
+        assert_eq!(Device::Auto.as_native(), 0);
+        assert_eq!(Device::Cpu.as_native(), 1);
+        assert_eq!(Device::Cuda.as_native(), 2);
+    }
 
     #[test]
     fn marshals_and_invokes_custom_logits_processor() {
@@ -624,7 +666,7 @@ mod tests {
                 assert_eq!(tokens, &[3, 5]);
                 logits[1] = 9.0;
             });
-        let marshaled = params.marshal().expect("marshal processor");
+        let marshaled = params.marshal(&compatibility()).expect("marshal processor");
         let callback = marshaled
             .raw()
             .logits_processor
@@ -654,7 +696,7 @@ mod tests {
                 .logits_processor(move |_, _| {
                     calls.fetch_add(1, Ordering::Relaxed);
                 });
-            let marshaled = params.marshal().expect("marshal processor");
+            let marshaled = params.marshal(&compatibility()).expect("marshal processor");
             marshaled.raw().logits_processor_user_data
         };
         let mut logits = [1.0];
@@ -675,7 +717,7 @@ mod tests {
         let params = SamplingParams::default()
             .max_tokens(2)
             .logits_processor(|_, _| panic!("processor panic"));
-        let marshaled = params.marshal().expect("marshal processor");
+        let marshaled = params.marshal(&compatibility()).expect("marshal processor");
         let mut logits = [1.0, 2.0];
         unsafe {
             logits_processor_trampoline(
@@ -709,12 +751,15 @@ mod tests {
                 .unbounded()
                 .logits_processor(|_, _| {}),
         ] {
-            let error = params.marshal().err().expect("invalid bounds rejection");
+            let error = params
+                .marshal(&compatibility())
+                .err()
+                .expect("invalid bounds rejection");
             assert!(matches!(error, Error::InvalidConfiguration { .. }));
         }
 
         let params = SamplingParams::default().logits_processor(|_, _| {});
-        let marshaled = params.marshal().expect("marshal processor");
+        let marshaled = params.marshal(&compatibility()).expect("marshal processor");
         unsafe {
             logits_processor_trampoline(
                 std::ptr::null(),
