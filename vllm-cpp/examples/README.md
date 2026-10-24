@@ -9,7 +9,7 @@ Text/video examples use the safe `vllm-cpp` api. `video_generate` is experimenta
 | [`concurrent`](concurrent.rs) | submits two asynchronous streaming requests and waits for both |
 | [`chat`](chat.rs) | runs a Clap-based interactive chat with conversation history and streaming output |
 | [`structured`](structured.rs) | extracts a fixed weather report under a JSON Schema |
-| [`video_generate`](video_generate.rs) | experimental MiniMax-H3 PPM/WAV generation with optional ffmpeg MP4 muxing; not validated end-to-end |
+| [`video_generate`](video_generate.rs) | minimal local-checkpoint MiniMax-H3 PPM/WAV generation; not validated end-to-end |
 | [`setup_test_model`](setup_test_model.rs) | resolves the pinned Qwen test fixture for `just setup-test-model`; not a general inference CLI |
 
 The library also supports pre-tokenized completion without adding another binary:
@@ -109,25 +109,28 @@ At `user>` enter `/clear` to retain the system message while clearing other hist
 
 ## experimental MiniMax-H3 video CLI
 
-Experimental `video_generate --prompt <TEXT> [OPTIONS]` needs MiniMax-H3 checkpoints, ample memory/storage, and a compatible backend. See `--help`; end-to-end validation is pending.
+`video_generate` demonstrates blocking generation from a local MiniMax-H3 checkpoint set. It does not download files, manage a Hub cache, execute ffmpeg, or publish an MP4. End-to-end MiniMax-H3 generation is not validated here; compatible checkpoints, ample memory/storage, and a suitable backend are the caller's responsibility.
 
-Before running default `--device cuda`, satisfy the [CUDA prerequisites](#experimental-cuda) and export `VLLM_CPP_CUDA_ARCHITECTURES` for your GPU and `CARGO_TARGET_DIR` naming a fresh build directory:
+CPU is the default and requires an F32 DiT, not quantized GGUF or BF16 weights. Supply explicit local files, including both VAE configs:
 
 ```console
 CMAKE_GENERATOR=Ninja \
-  cargo run --locked --release -p vllm-cpp --features cuda --example video_generate -- \
-  --prompt "A quiet shoreline at sunrise" --workdir minimax-h3-output
+  cargo run --locked --release -p vllm-cpp --example video_generate -- \
+  --dit /models/minimax/dit-f32.safetensors \
+  --encoder /models/minimax/encoder.gguf \
+  --tokenizer /models/minimax/tokenizer.json \
+  --video-vae /models/minimax/video-vae.safetensors \
+  --video-vae-config /models/minimax/video-vae-config.json \
+  --audio-vae /models/minimax/audio-vae.safetensors \
+  --audio-vae-config /models/minimax/audio-vae-config.json \
+  --prompt "A quiet shoreline at sunrise" --output-dir minimax-h3-output
 ```
 
-On Nix, prefix `cargo run` with `nix develop .#cuda -c`. Default bundled builds reject CUDA before workdir creation/locking or Hub access. With `--no-default-features --features system`, native checks determine CUDA capability.
+The example defaults to `--partition fl2va`, 256x256, five requested frames and two steps; `--width`, `--height`, `--frames`, `--steps` and `--seed` expose a small generation subset. For Ref2VA, select its matching DiT and add `--partition ref2va --reference-image /path/to/reference.ppm` (P6 PPM). Other reference media and FL2VA keyframes remain available through the library, not this CLI. Native checks determine checkpoint, partition, dimensions and media compatibility.
 
-CPU needs F32 DiT, not the default quantized GGUF or `--dequant-bf16` BF16. Custom files do not establish backend support.
+For quantized CUDA checkpoints, satisfy the [CUDA prerequisites](#experimental-cuda), use `--features cuda` and `--device cuda`, and set the target architecture and a fresh build directory. There is no silent CPU fallback; system builds defer backend capability to the installed library.
 
-Seven artifacts use the Hub cache (`HF_HOME`), nonempty `HF_TOKEN` or cached login. Hub queries pin revision groups to commits and fetch cache misses; no offline flag. Defaults follow mutable `main`; pin `--gguf-revision`, `--encoder-revision`, `--vae-revision`, and `--config-revision` to commits.
-
-`--partition ref2va` needs image/frames/audio, not FL2VA keyframes. Images: P6 PPM; audio: PCM16 WAV, 32 kHz.
-
-Workdir: `minimax-h3-output` by default; `.video_generate.lock` excludes writers. Existing native outputs are refused. Outputs: `frame_%06d.ppm`, `audio.wav`. `--output-mp4 <MP4>` runs ffmpeg (`--ffmpeg <PATH>`), publishing private output to a new path in an existing directory; reserved aliases are refused. Failure preserves PPM/WAV.
+`--output-dir` must be a new directory in an existing parent; any existing entry is refused before native loading. Generation writes `frame_%06d.ppm` and `audio.wav`. Load/generation failures leave the directory and any partial output for inspection. Paths are trusted, not sandboxed; do not change the directory concurrently. See `--help` for the complete small CLI.
 
 ## optional nix shell
 
