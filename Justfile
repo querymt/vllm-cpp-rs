@@ -208,7 +208,7 @@ _link-modes crate_root target_base:
     bundled_static_target="$work/bundled-static"
     echo '==> bundled static'
     CARGO_TARGET_DIR="$bundled_static_target" \
-      cargo test --locked -p vllm-cpp-sys --release --tests
+      cargo test --locked -p vllm-cpp-sys --release --test layout --test symbols
 
     bundled_dynamic_target="$work/bundled-dynamic"
     echo '==> bundled dynamic build'
@@ -221,7 +221,7 @@ _link-modes crate_root target_base:
     echo '==> bundled dynamic test'
     LD_LIBRARY_PATH="$bundled_dynamic_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
       CARGO_TARGET_DIR="$bundled_dynamic_target" \
-      cargo test --locked -p vllm-cpp-sys --release --tests --features dynamic-link
+      cargo test --locked -p vllm-cpp-sys --release --test layout --test symbols --features dynamic-link
 
     prefix="$work/system-prefix"
     mkdir -p "$prefix/include" "$prefix/lib" "$prefix/lib64" "$prefix/blake3-lib"
@@ -242,7 +242,7 @@ _link-modes crate_root target_base:
     VLLM_CPP_ROOT="$prefix" \
       VLLM_CPP_BLAKE3_LIB_DIR="$prefix/blake3-lib" \
       CARGO_TARGET_DIR="$system_static_target" \
-      cargo test --locked -vv -p vllm-cpp-sys --release --tests \
+      cargo test --locked -vv -p vllm-cpp-sys --release --test layout --test symbols \
         --no-default-features --features system 2>&1 | tee "$system_static_log"
     grep -Fq "cargo:rerun-if-changed=$prefix/lib/libvllm.a" "$system_static_log"
     grep -Fq \
@@ -269,7 +269,7 @@ _link-modes crate_root target_base:
     VLLM_CPP_ROOT="$prefix" \
       VLLM_CPP_BLAKE3_LIB_DIR="$prefix/blake3-lib" \
       CARGO_TARGET_DIR="$system_static_target" \
-      cargo test --locked -vv -p vllm-cpp-sys --release --tests \
+      cargo build --locked -vv -p vllm-cpp-sys --release \
         --no-default-features --features system 2>&1 | tee "$system_static_rerun_log"
     grep -Fq 'Dirty vllm-cpp-sys' "$system_static_rerun_log"
     grep -Fq 'libvllm.a' "$system_static_rerun_log"
@@ -317,7 +317,7 @@ _link-modes crate_root target_base:
     LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
       VLLM_CPP_ROOT="$prefix" \
       CARGO_TARGET_DIR="$system_dynamic_target" \
-      cargo test --locked -vv -p vllm-cpp-sys --release --tests \
+      cargo test --locked -vv -p vllm-cpp-sys --release --test layout --test symbols \
         --no-default-features --features system,dynamic-link 2>&1 \
       | tee "$system_dynamic_log"
     grep -Fq "cargo:rerun-if-changed=$prefix/lib/libvllm.so" \
@@ -723,19 +723,10 @@ native-capi:
     [[ $test_count -eq 1 ]]
     grep -Fxq 'Total Tests: 1' "$listing"
 
-    set +e
     env -u VT_ASYNC_SCHED -u VT_ASYNC_RUNNER \
       ctest --test-dir "$build" --output-on-failure --tests-regex '^test_capi$' \
       2>&1 | tee "$output"
-    default_status=${PIPESTATUS[0]}
-    set -e
-    if [[ $default_status -eq 0 ]]; then
-      grep -Fxq '100% tests passed, 0 tests failed out of 1' "$output"
-      exit 0
-    fi
-
-    echo "default native C API gate failed (status $default_status); alternate scheduler runs cannot satisfy this gate" >&2
-    exit "$default_status"
+    grep -Fxq '100% tests passed, 0 tests failed out of 1' "$output"
 
 # Run sys-first crates.io publication checks without uploading.
 publish-dry-run:

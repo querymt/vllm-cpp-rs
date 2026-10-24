@@ -43,7 +43,7 @@ fn main() {
         "src/build_support.rs",
         "vllm.cpp/CMakeLists.txt",
         "vllm.cpp/cmake",
-        "vllm.cpp/include/vllm.h",
+        "vllm.cpp/include",
         "vllm.cpp/src",
         "vllm.cpp/tests/vt/test_rocm_backend.cpp",
         "vllm.cpp/triton_kernels",

@@ -209,16 +209,7 @@ impl HuggingFaceModel {
                 self.repo_id, self.revision
             ))
         })?;
-        let sha = info.sha.trim();
-        // A path-safe branch name is still mutable, so require a full commit ID.
-        if !is_full_commit_sha(sha) {
-            return Err(incomplete("repository metadata has an invalid commit SHA"));
-        }
-        if is_full_commit_sha(&self.revision) && !sha.eq_ignore_ascii_case(&self.revision) {
-            return Err(incomplete(
-                "repository metadata differs from the requested commit",
-            ));
-        }
+        let sha = metadata_sha(&info, &self.revision)?;
         let pinned_repo =
             Repo::with_revision(self.repo_id.clone(), RepoType::Model, sha.to_owned());
         let result = api
@@ -236,13 +227,7 @@ impl HuggingFaceModel {
                 Ok(path)
             });
         if result.is_err() {
-            // hf-hub writes refs/<sha> before returning, even for a wrong snapshot.
-            // Restore only that immutable identity, never a stale mutable alias.
-            cache.repo(pinned_repo).create_ref(sha).map_err(|error| {
-                io_error(format!(
-                    "could not restore pinned cache ref `{sha}`: {error}"
-                ))
-            })?;
+            repair_pinned_ref(cache, pinned_repo, sha)?;
         }
         let path = result?;
         cache
@@ -262,61 +247,70 @@ impl HuggingFaceModel {
             .api_builder(cache.clone())
             .build()
             .map_err(|error| hub(format!("could not create API: {error}")))?;
+        self.resolve_safetensors_with_api(&cache, &api)
+    }
+
+    fn resolve_safetensors_with_api(
+        &self,
+        cache: &Cache,
+        api: &Api,
+    ) -> Result<PathBuf, HuggingFaceError> {
         let info = api.repo(self.requested_repo()).info().map_err(|error| {
             hub(format!(
                 "could not read metadata for `{}` at `{}`: {error}",
                 self.repo_id, self.revision
             ))
         })?;
-        let sha = info.sha.trim();
-        if sha.is_empty() {
-            return Err(incomplete("repository metadata has an empty commit SHA"));
-        }
-        validate_root_filename(sha, "repository metadata SHA")
-            .map_err(|_| incomplete("repository metadata has an unsafe SHA"))?;
+        let sha = metadata_sha(&info, &self.revision)?;
 
         let available = sibling_names(&info);
         let bootstrap = plan_safetensors(&available)?;
         let pinned_repo =
             Repo::with_revision(self.repo_id.clone(), RepoType::Model, sha.to_owned());
         let pinned = api.repo(pinned_repo.clone());
-        let index = if bootstrap.indexed {
-            let path = pinned.get(SAFETENSORS_INDEX).map_err(|error| {
-                hub(format!(
-                    "could not resolve `{SAFETENSORS_INDEX}` for `{}` at `{sha}`: {error}",
-                    self.repo_id
-                ))
-            })?;
-            let bytes = fs::read(&path).map_err(|error| {
-                io_error(format!("could not read `{}`: {error}", path.display()))
-            })?;
-            Some((path, bytes))
-        } else {
-            None
-        };
-        let (plan, index_path) = match index {
-            Some((path, bytes)) => (plan_indexed_safetensors(&available, &bytes)?, Some(path)),
-            None => (bootstrap, None),
-        };
+        let result = (|| {
+            let index = if bootstrap.indexed {
+                let path = pinned.get(SAFETENSORS_INDEX).map_err(|error| {
+                    hub(format!(
+                        "could not resolve `{SAFETENSORS_INDEX}` for `{}` at `{sha}`: {error}",
+                        self.repo_id
+                    ))
+                })?;
+                let bytes = fs::read(&path).map_err(|error| {
+                    io_error(format!("could not read `{}`: {error}", path.display()))
+                })?;
+                Some((path, bytes))
+            } else {
+                None
+            };
+            let (plan, index_path) = match index {
+                Some((path, bytes)) => (plan_indexed_safetensors(&available, &bytes)?, Some(path)),
+                None => (bootstrap, None),
+            };
 
-        let mut paths = HashMap::new();
-        if let Some(path) = index_path {
-            paths.insert(SAFETENSORS_INDEX.to_owned(), path);
-        }
-        for filename in &plan.files {
-            if paths.contains_key(filename) {
-                continue;
+            let mut paths = HashMap::new();
+            if let Some(path) = index_path {
+                paths.insert(SAFETENSORS_INDEX.to_owned(), path);
             }
-            let path = pinned.get(filename).map_err(|error| {
-                hub(format!(
-                    "could not resolve `{filename}` for `{}` at `{sha}`: {error}",
-                    self.repo_id
-                ))
-            })?;
-            paths.insert(filename.clone(), path);
-        }
+            for filename in &plan.files {
+                if paths.contains_key(filename) {
+                    continue;
+                }
+                let path = pinned.get(filename).map_err(|error| {
+                    hub(format!(
+                        "could not resolve `{filename}` for `{}` at `{sha}`: {error}",
+                        self.repo_id
+                    ))
+                })?;
+                paths.insert(filename.clone(), path);
+            }
 
-        let snapshot = verify_snapshot_paths(&paths, sha)?;
+            verify_snapshot_paths(&paths, sha)
+        })();
+        if result.is_err() {
+            repair_pinned_ref(cache, pinned_repo, sha)?;
+        }
+        let snapshot = result?;
         cache
             .repo(self.requested_repo())
             .create_ref(sha)
@@ -340,13 +334,6 @@ impl HuggingFaceModel {
                     ))
                 })?;
                 let snapshot = snapshot_for_cached_revision(cache, &self.requested_repo())?;
-                if is_full_commit_sha(&self.revision)
-                    && !snapshot_sha(&snapshot)?.eq_ignore_ascii_case(&self.revision)
-                {
-                    return Err(incomplete(
-                        "cached snapshot differs from the requested commit",
-                    ));
-                }
                 verify_gguf_path(&path, filename)?;
                 if path.parent() != Some(snapshot.as_path()) {
                     return Err(incomplete(format!(
@@ -536,7 +523,41 @@ fn snapshot_for_cached_revision(cache: &Cache, repo: &Repo) -> Result<PathBuf, H
             snapshot.display()
         )));
     }
+    verify_requested_commit(repo.revision(), sha, "cached snapshot")?;
     Ok(snapshot)
+}
+
+fn metadata_sha<'a>(info: &'a RepoInfo, revision: &str) -> Result<&'a str, HuggingFaceError> {
+    let sha = info.sha.trim();
+    // A path-safe branch name is still mutable, so require a full commit ID.
+    if !is_full_commit_sha(sha) {
+        return Err(incomplete("repository metadata has an invalid commit SHA"));
+    }
+    verify_requested_commit(revision, sha, "repository metadata")?;
+    Ok(sha)
+}
+
+fn verify_requested_commit(
+    revision: &str,
+    sha: &str,
+    source: &str,
+) -> Result<(), HuggingFaceError> {
+    if is_full_commit_sha(revision) && !sha.eq_ignore_ascii_case(revision) {
+        return Err(incomplete(format!(
+            "{source} differs from the requested commit"
+        )));
+    }
+    Ok(())
+}
+
+fn repair_pinned_ref(cache: &Cache, repo: Repo, sha: &str) -> Result<(), HuggingFaceError> {
+    // hf-hub writes refs/<sha> before returning, even for a wrong snapshot.
+    // Restore only that immutable identity, never a stale mutable alias.
+    cache.repo(repo).create_ref(sha).map_err(|error| {
+        io_error(format!(
+            "could not restore pinned cache ref `{sha}`: {error}"
+        ))
+    })
 }
 
 fn verify_gguf_path(path: &Path, filename: &str) -> Result<(), HuggingFaceError> {
@@ -814,6 +835,20 @@ mod tests {
             download_sha: &str,
             hook: impl FnOnce() + Send + 'static,
         ) -> Self {
+            Self::with_files_and_hook(
+                info_sha,
+                download_sha,
+                &[("model.gguf", "revision-a")],
+                hook,
+            )
+        }
+
+        fn with_files_and_hook(
+            info_sha: &str,
+            download_sha: &str,
+            files: &[(&str, &str)],
+            hook: impl FnOnce() + Send + 'static,
+        ) -> Self {
             use std::io::{BufRead, Write};
             use std::sync::{atomic::AtomicBool, Arc, Mutex};
             use std::time::{Duration, Instant};
@@ -827,6 +862,10 @@ mod tests {
             let done = Arc::clone(&stop);
             let info_sha = info_sha.to_owned();
             let download_sha = download_sha.to_owned();
+            let files: HashMap<String, String> = files
+                .iter()
+                .map(|(name, body)| ((*name).to_owned(), (*body).to_owned()))
+                .collect();
             let mut hook = Some(hook);
             let worker = std::thread::spawn(move || {
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -863,9 +902,11 @@ mod tests {
                         }
                     }
                     seen.lock().unwrap().push((path.clone(), range.clone()));
+                    let filename = path.rsplit('/').next().unwrap();
+                    let content = files.get(filename).map(String::as_str).unwrap_or("");
                     let (body, headers) = if path.starts_with("/api/") {
                         (
-                            serde_json::json!({"sha": info_sha, "siblings": [{"rfilename": "model.gguf"}]}).to_string(),
+                            serde_json::json!({"sha": info_sha, "siblings": files.keys().map(|name| serde_json::json!({"rfilename": name})).collect::<Vec<_>>()} ).to_string(),
                             "Content-Type: application/json\r\n".to_owned(),
                         )
                     } else if range == "bytes=0-0" {
@@ -874,18 +915,24 @@ mod tests {
                         }
                         (
                             "r".to_owned(),
-                            format!("x-repo-commit: {download_sha}\r\netag: \"blob-a\"\r\nContent-Range: bytes 0-0/10\r\n"),
+                            format!("x-repo-commit: {download_sha}\r\netag: \"blob-{filename}\"\r\nContent-Range: bytes 0-0/{}\r\n", content.len()),
                         )
                     } else {
                         // A mutable branch has moved since metadata was fetched.
-                        let body = if path.contains(COMMIT) {
-                            "revision-a"
-                        } else {
+                        let body = if filename == "model.gguf" && !path.contains(COMMIT) {
                             "revision-b"
+                        } else {
+                            content
                         };
                         (body.to_owned(), String::new())
                     };
-                    write!(stream, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
+                    // Empty mock bodies deliberately simulate a missing download.
+                    let status = if !path.starts_with("/api/") && content.is_empty() {
+                        "404 Not Found"
+                    } else {
+                        "200 OK"
+                    };
+                    write!(stream, "HTTP/1.1 {status}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
                 }
             });
             Self {
@@ -1151,6 +1198,240 @@ mod tests {
             fs::read(snapshot.join("other.gguf")).unwrap(),
             b"newer-alias"
         );
+    }
+
+    fn safetensors_files(indexed: bool) -> Vec<(&'static str, &'static str)> {
+        let mut files = vec![(CONFIG, "config"), (TOKENIZER, "tokenizer")];
+        if indexed {
+            files.extend([
+                (
+                    SAFETENSORS_INDEX,
+                    r#"{"weight_map":{"x":"part.safetensors"}}"#,
+                ),
+                ("part.safetensors", "weights"),
+            ]);
+        } else {
+            files.push((SAFETENSORS, "weights"));
+        }
+        files
+    }
+
+    fn safetensors_wrong_offline_ref(indexed: bool) {
+        let temp = TempDir::new();
+        let cache = Cache::new(temp.0.clone());
+        let model = HuggingFaceModel::safetensors(REPO)
+            .revision(COMMIT)
+            .cache_dir(&temp.0)
+            .offline(true);
+        let requested = cache.repo(model.requested_repo());
+        requested.create_ref(MOVED).unwrap();
+        let snapshot = requested.pointer_path(MOVED);
+        fs::create_dir_all(&snapshot).unwrap();
+        for (filename, contents) in safetensors_files(indexed) {
+            fs::write(snapshot.join(filename), contents).unwrap();
+        }
+        assert_incomplete_contains(model.resolve(), "requested commit");
+    }
+
+    #[test]
+    fn safetensors_explicit_sha_offline_rejects_complete_unsharded_wrong_ref() {
+        safetensors_wrong_offline_ref(false);
+    }
+
+    #[test]
+    fn safetensors_explicit_sha_offline_rejects_complete_indexed_wrong_ref() {
+        safetensors_wrong_offline_ref(true);
+    }
+
+    #[test]
+    fn safetensors_explicit_sha_offline_accepts_matching_snapshot_but_requires_ref() {
+        for indexed in [false, true] {
+            let temp = TempDir::new();
+            let cache = Cache::new(temp.0.clone());
+            let model = HuggingFaceModel::safetensors(REPO)
+                .revision(COMMIT.to_ascii_uppercase())
+                .cache_dir(&temp.0)
+                .offline(true);
+            let requested = cache.repo(model.requested_repo());
+            requested.create_ref(COMMIT).unwrap();
+            let snapshot = requested.pointer_path(COMMIT);
+            fs::create_dir_all(&snapshot).unwrap();
+            for (filename, contents) in safetensors_files(indexed) {
+                fs::write(snapshot.join(filename), contents).unwrap();
+            }
+            assert_eq!(model.resolve().unwrap(), snapshot);
+            fs::remove_file(
+                temp.0
+                    .join("models--owner--model/refs")
+                    .join(&model.revision),
+            )
+            .unwrap();
+            assert!(matches!(
+                model.resolve(),
+                Err(HuggingFaceError::CacheMiss { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn safetensors_online_rejects_invalid_or_different_metadata_before_download_or_ref_write() {
+        for sha in [MOVED, "", "../unsafe", "main"] {
+            let temp = TempDir::new();
+            let cache = Cache::new(temp.0.clone());
+            let model = HuggingFaceModel::safetensors(REPO)
+                .revision(COMMIT)
+                .cache_dir(&temp.0);
+            let requested = cache.repo(model.requested_repo());
+            requested.create_ref(COMMIT).unwrap();
+            let snapshot = requested.pointer_path(COMMIT);
+            fs::create_dir_all(&snapshot).unwrap();
+            for (filename, contents) in safetensors_files(false) {
+                fs::write(snapshot.join(filename), contents).unwrap();
+            }
+            let server = MockHub::with_files_and_hook(sha, MOVED, &safetensors_files(false), || {});
+            assert_incomplete_contains(
+                model.resolve_safetensors_with_api(&cache, &server.api(cache.clone())),
+                if sha == MOVED {
+                    "requested commit"
+                } else {
+                    "invalid commit SHA"
+                },
+            );
+            assert_eq!(server.requests.lock().unwrap().len(), 1);
+            assert_eq!(model.offline(true).resolve().unwrap(), snapshot);
+            assert_eq!(fs::read(snapshot.join(SAFETENSORS)).unwrap(), b"weights");
+            assert!(!temp
+                .0
+                .join("models--owner--model/refs")
+                .join(MOVED)
+                .exists());
+        }
+    }
+
+    #[test]
+    fn safetensors_online_pins_alias_and_explicit_sha_reuses_cache_and_resolves_offline() {
+        for indexed in [false, true] {
+            for revision in [REVISION.to_owned(), COMMIT.to_ascii_uppercase()] {
+                let temp = TempDir::new();
+                let cache = Cache::new(temp.0.clone());
+                let files = safetensors_files(indexed);
+                let server = MockHub::with_files_and_hook(COMMIT, COMMIT, &files, || {});
+                let model = HuggingFaceModel::safetensors(REPO)
+                    .revision(revision)
+                    .cache_dir(&temp.0);
+                let api = server.api(cache.clone());
+                let snapshot = model.resolve_safetensors_with_api(&cache, &api).unwrap();
+                assert_eq!(snapshot_sha(&snapshot).unwrap(), COMMIT);
+                for (filename, contents) in &files {
+                    assert_eq!(
+                        fs::read(snapshot.join(filename)).unwrap(),
+                        contents.as_bytes()
+                    );
+                }
+                let requests = server.requests.lock().unwrap().clone();
+                assert_eq!(requests.len(), 1 + 2 * files.len());
+                assert!(requests[1..]
+                    .iter()
+                    .all(|(path, _)| path.starts_with(&format!("/{REPO}/resolve/{COMMIT}/"))));
+                assert_eq!(
+                    model.resolve_safetensors_with_api(&cache, &api).unwrap(),
+                    snapshot
+                );
+                assert_eq!(server.requests.lock().unwrap().len(), requests.len() + 1);
+                assert_eq!(model.offline(true).resolve().unwrap(), snapshot);
+            }
+        }
+    }
+
+    fn safetensors_rejected_multifile(failure: &str) {
+        for revision in [COMMIT, REVISION] {
+            let temp = TempDir::new();
+            let cache = Cache::new(temp.0.clone());
+            let model = HuggingFaceModel::safetensors(REPO)
+                .revision(revision)
+                .cache_dir(&temp.0);
+            let requested = cache.repo(model.requested_repo());
+            requested.create_ref(COMMIT).unwrap();
+            let good = requested.pointer_path(COMMIT);
+            fs::create_dir_all(&good).unwrap();
+            fs::write(good.join(CONFIG), "keep-config").unwrap();
+            fs::write(good.join("other.gguf"), "keep-other").unwrap();
+            let mut files = safetensors_files(failure == "index");
+            if failure == "index" {
+                files
+                    .iter_mut()
+                    .find(|(name, _)| *name == SAFETENSORS_INDEX)
+                    .unwrap()
+                    .1 = "invalid JSON";
+            } else if failure == "get" {
+                files
+                    .iter_mut()
+                    .find(|(name, _)| *name == SAFETENSORS)
+                    .unwrap()
+                    .1 = "";
+            }
+            let server = MockHub::with_files_and_hook(COMMIT, MOVED, &files, || {});
+            let result = model.resolve_safetensors_with_api(&cache, &server.api(cache.clone()));
+            match failure {
+                "snapshot" => assert_incomplete_contains(result, "snapshots/"),
+                "index" => assert_incomplete_contains(result, "malformed JSON"),
+                _ => assert!(matches!(result, Err(HuggingFaceError::Hub { .. }))),
+            }
+            let refs = temp.0.join("models--owner--model/refs");
+            assert_eq!(fs::read_to_string(refs.join(COMMIT)).unwrap(), COMMIT);
+            assert_eq!(fs::read_to_string(refs.join(revision)).unwrap(), COMMIT);
+            assert_eq!(fs::read(good.join(CONFIG)).unwrap(), b"keep-config");
+            let other = HuggingFaceModel::gguf(REPO, "other.gguf")
+                .revision(COMMIT)
+                .cache_dir(&temp.0)
+                .offline(true);
+            assert_eq!(fs::read(other.resolve().unwrap()).unwrap(), b"keep-other");
+            assert!(model.offline(true).resolve().is_err());
+        }
+    }
+
+    #[test]
+    fn safetensors_mixed_snapshot_repairs_only_pinned_identity() {
+        safetensors_rejected_multifile("snapshot");
+    }
+
+    #[test]
+    fn safetensors_invalid_downloaded_index_repairs_only_pinned_identity() {
+        safetensors_rejected_multifile("index");
+    }
+
+    #[test]
+    fn safetensors_later_get_failure_repairs_only_pinned_identity() {
+        safetensors_rejected_multifile("get");
+    }
+
+    #[test]
+    fn safetensors_rejected_download_does_not_roll_back_newer_mutable_alias() {
+        let temp = TempDir::new();
+        let cache = Cache::new(temp.0.clone());
+        let model = HuggingFaceModel::safetensors(REPO)
+            .revision(REVISION)
+            .cache_dir(&temp.0);
+        let requested = cache.repo(model.requested_repo());
+        requested.create_ref(COMMIT).unwrap();
+        let server =
+            MockHub::with_files_and_hook(COMMIT, MOVED, &safetensors_files(false), move || {
+                requested.create_ref(MOVED).unwrap();
+            });
+        assert_incomplete_contains(
+            model.resolve_safetensors_with_api(&cache, &server.api(cache.clone())),
+            "snapshots/",
+        );
+        assert_eq!(
+            fs::read_to_string(temp.0.join("models--owner--model/refs").join(REVISION)).unwrap(),
+            MOVED
+        );
+        // The complete newer snapshot is usable through the alias, not through the rejected pin.
+        assert_eq!(
+            snapshot_sha(&model.clone().offline(true).resolve().unwrap()).unwrap(),
+            MOVED
+        );
+        assert!(model.revision(COMMIT).offline(true).resolve().is_err());
     }
 
     #[test]
