@@ -250,7 +250,7 @@ fn validate_feature_implications(features: &Features) -> Result<(), ConfigError>
     }
     if features.cuda && features.vulkan {
         return Err(ConfigError::new(
-            "`cuda` and `vulkan` cannot be combined in release 0.1; build separate backend artifacts",
+            "`cuda` and `vulkan` cannot be combined; build separate backend artifacts",
         ));
     }
     Ok(())

@@ -2,6 +2,8 @@
 
 Releases are prepared and published manually. A candidate pass or dry-run does not authorize a Git tag, crates.io upload, merge, push, or GitHub release. Publication is an irreversible registry action and requires separate maintainer authorization.
 
+Uncommitted development runs may exercise the gates below, but must be reported as dirty-tree validation, not approved release proof. Formal release validation and publication require the independently approved exact commit and clean identities below.
+
 ## Prepare a candidate
 
 1. Obtain `VLLM_CPP_RELEASE_COMMIT` from the independent approval of the exact release commit. Never derive the expected value from the current checkout. Require a lowercase, full 40-character SHA, verify that it names a commit object, and compare it with the root checkout before any candidate gate:
@@ -63,11 +65,13 @@ RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps --features v
 git diff --check
 ```
 
-`just ci` includes formatting, warnings-denied lint/docs, model-free workspace tests, generated bindings and ABI conformance, four CPU link modes, the native C API fixture, model-free ASan/UBSan/leak checks, package/extracted/downstream validation, and no-upload publish dry-run. Run the exact MSRV gate separately so stable-toolchain success cannot mask it.
+`just ci` includes formatting, deterministic release-tooling regressions, warnings-denied lint/docs, model-free workspace tests, generated bindings and ABI conformance, four CPU link modes, the native C API fixture, model-free ASan/UBSan/leak checks, package/extracted/downstream validation, and no-upload publish dry-run. Run the exact MSRV gate separately so stable-toolchain success cannot mask it.
 
-Nix support remains an optional convenience, not a prerequisite. Maintainers who choose it may run `nix develop -c env -u VLLM_CPP_TEST_MODEL just ci` and `nix develop .#msrv -c just msrv`; `nix flake check --no-build` is an additional Nix-specific evaluation check, not an ordinary release gate.
+The native fixture gate always runs with `VT_ASYNC_SCHED` and `VT_ASYNC_RUNNER` unset and preserves any default-run failure. No assertion is waived or excluded. A separate `VT_ASYNC_SCHED=0` run may help diagnose callback coalescing, but cannot satisfy the default gate or establish token loss from callback cardinality alone. Record default and diagnostic commands/statuses independently; a default failure is a candidate blocker. If `just ci` stops, run the remaining recipes separately to expose other blockers, not to relabel the aggregate as passed.
 
-Prepared-Qwen inference/sanitizers, native-only TSan, successful Rust MiniMax-H3 generation, Miri, Linux ARM64, Apple ARM64, Vulkan, CUDA/CUTLASS/Triton, Metal/MLX, and accelerator runtime are optional or deferred. Record one only when it ran against the exact candidate; configured workflows and older results are not candidate evidence.
+Nix support remains an optional convenience, not a prerequisite. Maintainers who choose it may run `nix develop --no-write-lock-file -c env -u VLLM_CPP_TEST_MODEL just ci` and `nix develop .#msrv --no-write-lock-file -c just msrv`; `nix flake check --no-build` is an additional Nix-specific evaluation check, not an ordinary release gate.
+
+Prepared-Qwen inference/sanitizers, native-only TSan, successful Rust MiniMax-H3 generation, Miri, Linux ARM64, Apple ARM64, Vulkan, CUDA/CUTLASS/Triton, Metal/MLX, and accelerator runtime are optional or deferred. Record one only when it ran against the exact candidate; configured workflows and older results are not candidate evidence. Sanitizer recipes select one package/target test artifact from Cargo JSON rather than target-directory timestamps. Full suites must report matching nonzero running/passed counts, and every exact TSan filter must report one named passed test; a missing filter is a failure, not coverage.
 
 ## Inspect packages
 
@@ -83,7 +87,7 @@ For both runs, retain:
 
 - sorted `cargo package --list` inventories and archive basenames;
 - normalized `Cargo.toml` manifests, including exact `vllm-cpp-sys =0.0.2`;
-- file counts and unpacked/compressed sizes, enforcing sys limits of 1,400 files, 40 MiB unpacked, and 6 MiB compressed and safe limits of 40 files, 512 KiB unpacked, and 128 KiB compressed;
+- file counts and payload/compressed sizes as diagnostics only, with no arbitrary numeric package size or file-count caps for either crate; payload means the sum of regular archive member sizes for both crates, excluding directory metadata and archive headers, not `du` of the extracted tree; exact inventory, content, provenance, and compatibility checks remain mandatory;
 - complete license/notice/provenance inventories and checks that current READMEs, source, tests, examples, and required native/backend inputs are present;
 - SHA-256 for both archives from each run and successful extracted/offline builds, all four extracted sys link modes, and independent sys and safe downstream consumers.
 

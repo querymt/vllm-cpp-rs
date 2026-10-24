@@ -110,7 +110,7 @@ just sanitizers "$model"
 just tsan "$model"
 ```
 
-These commands are optional evidence and are recorded only when rerun against the exact candidate. The TSan recipe instruments native C++ only and does not claim Rust standard-library race coverage. `VLLM_CPP_SANITIZE` is a bundled-build test input; system mode rejects it.
+These commands are optional evidence and are recorded only when rerun against the exact candidate. Sanitizer recipes use exact package/target executables from Cargo JSON, require nonzero complete suites, and reject an exact TSan filter unless one named test passes. The TSan recipe instruments native C++ only and does not claim Rust standard-library race coverage. `VLLM_CPP_SANITIZE` is a bundled-build test input; system mode rejects it.
 
 ## Link Modes
 
@@ -131,13 +131,15 @@ cargo package -p vllm-cpp --locked --list
 just package-test
 ```
 
-The package gate validates deterministic inventories for both crates, package metadata, required source/docs/examples/tests/licenses/native inputs, forbidden payloads, and license provenance. It extracts and tests both crates offline, then runs independent sys and safe downstream consumers; the safe consumer resolves both extracted crates rather than this workspace. The sys package carries only native build inputs and required licenses/notices; upstream tests, large fixtures, media, benchmarks, fetched SDKs, external CUTLASS trees, and agent records are excluded.
+The package gate reports file counts, compressed sizes, payload bytes, and SHA-256 hashes as diagnostics only; neither crate has an arbitrary numeric package size or file-count cap. Payload bytes are the sum of regular archive member sizes, not filesystem-dependent extracted directory sizes. It validates deterministic inventories for both crates, package metadata, required source/docs/examples/tests/licenses/native inputs, forbidden payloads, and license provenance. It extracts and tests both crates offline, then runs independent sys and safe downstream consumers; the safe consumer resolves both extracted crates rather than this workspace. The sys package carries only native build inputs and required licenses/notices; upstream tests, large fixtures, media, benchmarks, fetched SDKs, external CUTLASS trees, and agent records are excluded.
 
 `just publish-dry-run` performs a sys-then-safe workspace packaging dry-run without uploading; it uses `--no-verify` to avoid the pre-publication registry cycle. As required by [RELEASING.md](RELEASING.md), after `vllm-cpp-sys` is available from crates.io, run the full `cargo publish -p vllm-cpp --locked --dry-run` verification before publishing the safe crate.
 
 ## Validation Boundary
 
-Mandatory candidate evidence is Linux x86_64 CPU and model-free: formatting, lint, docs, workspace tests, generated-binding/header/layout/signature/ABI/exact-export checks, all four CPU link modes, native C API fixtures, ASan/UBSan/leak checks over committed fixtures, package extraction/downstream checks, publication dry-run, and exact MSRV validation.
+Mandatory candidate evidence is Linux x86_64 CPU and model-free: formatting, release-tooling regressions, lint, docs, workspace tests, generated-binding/header/layout/signature/ABI/exact-export checks, all four CPU link modes, native C API fixtures, ASan/UBSan/leak checks over committed fixtures, package extraction/downstream checks, publication dry-run, and exact MSRV validation.
+
+`just native-capi` preserves the default scheduler result with `VT_ASYNC_SCHED` and `VT_ASYNC_RUNNER` unset. A failing default fixture blocks the candidate; a separate synchronous diagnostic run cannot make it green. Callback cardinality is not token cardinality. Dirty-tree development passes are not a substitute for independently approved clean-commit validation in [RELEASING.md](RELEASING.md).
 
 Prepared Qwen inference/sanitizers, native-only TSan, successful Rust MiniMax-H3 generation, Miri, Linux ARM64, Apple ARM64, Vulkan, CUDA/CUTLASS/Triton, Metal/MLX, and accelerator runtime are optional or deferred lanes. The manual platform workflows are configuration, not exact-candidate evidence unless separately dispatched and recorded.
 
