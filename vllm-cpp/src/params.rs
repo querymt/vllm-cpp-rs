@@ -555,39 +555,46 @@ unsafe extern "C" fn logits_processor_trampoline(
     vocab_size: i32,
     user_data: *mut c_void,
 ) {
-    if user_data.is_null() {
-        return;
-    }
-    let Some(state) = registered_logits_processor(user_data.addr()) else {
-        return;
-    };
-    if state.failure.load(Ordering::Acquire) != PROCESSOR_OK {
-        return;
-    }
-    if n_token_ids < 0
-        || vocab_size <= 0
-        || (n_token_ids > 0 && token_ids.is_null())
-        || logits.is_null()
-        || (n_token_ids > 0 && !valid_slice_layout(token_ids, n_token_ids as usize))
-        || !valid_slice_layout(logits, vocab_size as usize)
-    {
-        state.record_failure(PROCESSOR_INVALID_INPUT);
-        return;
-    }
+    // The local Arc can be the final owner after concurrent request teardown.
+    // Its user captures, guards, and every early return must unwind inside Rust.
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+        if user_data.is_null() {
+            return;
+        }
+        let Some(state) = registered_logits_processor(user_data.addr()) else {
+            return;
+        };
+        if state.failure.load(Ordering::Acquire) != PROCESSOR_OK {
+            return;
+        }
+        if n_token_ids < 0
+            || vocab_size <= 0
+            || (n_token_ids > 0 && token_ids.is_null())
+            || logits.is_null()
+            || (n_token_ids > 0 && !valid_slice_layout(token_ids, n_token_ids as usize))
+            || !valid_slice_layout(logits, vocab_size as usize)
+        {
+            state.record_failure(PROCESSOR_INVALID_INPUT);
+            return;
+        }
 
-    let _active = ActiveProcessorGuard::enter(&state);
-    let tokens = if n_token_ids == 0 {
-        &[]
-    } else {
-        // SAFETY: the native callback contract lends this aligned token slice for
-        // this invocation, and the validated length fits Rust slice bounds.
-        unsafe { slice::from_raw_parts(token_ids, n_token_ids as usize) }
-    };
-    // SAFETY: the native callback contract lends this aligned, uniquely mutable
-    // logits row for this invocation, and the validated length fits slice bounds.
-    let logits = unsafe { slice::from_raw_parts_mut(logits, vocab_size as usize) };
-    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| (state.callback)(tokens, logits))) {
-        state.record_failure(PROCESSOR_PANICKED);
+        let _active = ActiveProcessorGuard::enter(&state);
+        let tokens = if n_token_ids == 0 {
+            &[]
+        } else {
+            // SAFETY: the native callback contract lends this aligned token slice for
+            // this invocation, and the validated length fits Rust slice bounds.
+            unsafe { slice::from_raw_parts(token_ids, n_token_ids as usize) }
+        };
+        // SAFETY: the native callback contract lends this aligned, uniquely mutable
+        // logits row for this invocation, and the validated length fits slice bounds.
+        let logits = unsafe { slice::from_raw_parts_mut(logits, vocab_size as usize) };
+        // Catch the body separately so capture destruction cannot double-unwind.
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| (state.callback)(tokens, logits))) {
+            state.record_failure(PROCESSOR_PANICKED);
+            discard_panic_payload(payload);
+        }
+    })) {
         discard_panic_payload(payload);
     }
 }
@@ -764,6 +771,96 @@ mod tests {
                 logits.len() as i32,
                 marshaled.raw().logits_processor_user_data,
             );
+        }
+    }
+
+    #[test]
+    fn contains_final_processor_capture_drop_panic() {
+        const CHILD: &str = "VLLM_CPP_PROCESSOR_DROP_CHILD";
+        if let Ok(mode) = std::env::var(CHILD) {
+            struct PanicPayload;
+            impl Drop for PanicPayload {
+                fn drop(&mut self) {
+                    // A ZST secondary payload exercises safe forgetting without a heap leak.
+                    std::panic::panic_any(());
+                }
+            }
+            struct Capture(Arc<AtomicUsize>);
+            impl Drop for Capture {
+                fn drop(&mut self) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    std::panic::panic_any(PanicPayload);
+                }
+            }
+
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let capture = Capture(Arc::clone(&dropped));
+            let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let release_rx = std::sync::Mutex::new(release_rx);
+            let params = SamplingParams::default().logits_processor(move |_, _| {
+                let _keep_capture_alive = &capture;
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                if mode == "body-and-drop" {
+                    std::panic::panic_any(PanicPayload);
+                }
+            });
+            let marshaled = params.marshal(&compatibility()).unwrap();
+            let id = marshaled.raw().logits_processor_user_data.addr();
+            let worker = std::thread::spawn(move || {
+                let mut logits = [1.0];
+                unsafe {
+                    logits_processor_trampoline(
+                        std::ptr::null(),
+                        0,
+                        logits.as_mut_ptr(),
+                        1,
+                        std::ptr::without_provenance_mut(id),
+                    );
+                }
+            });
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            drop(params);
+            drop(marshaled);
+            assert!(super::registered_logits_processor(id).is_none());
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+            release_tx.send(()).unwrap();
+            worker.join().unwrap();
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            return;
+        }
+
+        for mode in ["drop", "body-and-drop"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "params::tests::contains_final_processor_capture_drop_panic",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "{mode} child failed: {status}");
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("{mode} child timed out");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
     }
 

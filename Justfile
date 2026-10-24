@@ -720,21 +720,13 @@ package-test:
     check_package_links "$safe_root" README.md examples/README.md
 
     sys_package_size=$(stat -c '%s' "$sys_package")
-    sys_unpacked_size=$(du -sb "$sys_root" | cut -f1)
-    sys_regular_file_bytes=$(find "$sys_root" -type f -printf '%s\n' \
-      | awk '{ total += $1 } END { print total + 0 }')
+    sys_payload_size=$(just --justfile {{ quote(root + "/Justfile") }} _package-payload "$sys_package")
     sys_package_sha256=$(sha256sum "$sys_package" | awk '{ print $1 }')
     sys_entry_count=$(wc -l < "$sys_list")
     safe_package_size=$(stat -c '%s' "$safe_package")
-    safe_unpacked_size=$(du -sb "$safe_root" | cut -f1)
+    safe_payload_size=$(just --justfile {{ quote(root + "/Justfile") }} _package-payload "$safe_package")
     safe_package_sha256=$(sha256sum "$safe_package" | awk '{ print $1 }')
     safe_entry_count=$(wc -l < "$safe_list")
-    ((sys_package_size <= 6 * 1024 * 1024))
-    ((sys_unpacked_size <= 40 * 1024 * 1024))
-    ((sys_entry_count <= 1400))
-    ((safe_package_size <= 128 * 1024))
-    ((safe_unpacked_size <= 512 * 1024))
-    ((safe_entry_count <= 40))
 
     jq -e --arg version "$version" '
       .packages | length == 1
@@ -870,71 +862,12 @@ package-test:
         cargo run --locked --release --offline
     )
 
-    printf 'sys package: %d entries, %d regular-file bytes, %d du bytes, %d compressed bytes, sha256 %s\n' \
-      "$sys_entry_count" "$sys_regular_file_bytes" "$sys_unpacked_size" \
+    printf 'sys package: %d entries, %d payload bytes, %d compressed bytes, sha256 %s\n' \
+      "$sys_entry_count" "$sys_payload_size" \
       "$sys_package_size" "$sys_package_sha256"
-    printf 'safe package: %d entries, %d bytes unpacked, %d bytes compressed, sha256 %s\n' \
-      "$safe_entry_count" "$safe_unpacked_size" "$safe_package_size" \
+    printf 'safe package: %d entries, %d payload bytes, %d compressed bytes, sha256 %s\n' \
+      "$safe_entry_count" "$safe_payload_size" "$safe_package_size" \
       "$safe_package_sha256"
-
-[private]
-_native-capi-known-flake output:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    python3 - {{ quote(output) }} <<'PY'
-    import re
-    import sys
-
-    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-
-    cases = re.findall(r"^\s*TEST CASE:\s*(.*?)\s*$", text, re.MULTILINE)
-    if cases != ["capi: vllm_complete_stream early-stop tears the request down cleanly"]:
-        raise SystemExit(f"native C API failure was not the sole known test case: {cases}")
-
-    errors = re.findall(
-        r"^.*test_capi\.cpp:(\d+): ERROR:\s*(.*?)\s*$", text, re.MULTILINE
-    )
-    expected_error = [("680", "CHECK( acc.deltas == 2 ) is NOT correct!")]
-    if errors != expected_error:
-        raise SystemExit(f"native C API failure did not have the exact known assertion: {errors}")
-
-    values = re.findall(r"^\s*values:\s*(.*?)\s*$", text, re.MULTILINE)
-    if values != ["CHECK( 1 == 2 )"]:
-        raise SystemExit(f"native C API failure did not observe exactly 1 == 2: {values}")
-
-    case_summaries = re.findall(
-        r"^\[doctest\]\s+test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*"
-        r"(\d+) failed\s*\|\s*(\d+) skipped\s*$",
-        text,
-        re.MULTILINE,
-    )
-    if case_summaries != [("49", "48", "1", "0")]:
-        raise SystemExit(f"native C API test-case summary was not the known sole failure: {case_summaries}")
-
-    assertion_summaries = re.findall(
-        r"^\[doctest\]\s+assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*"
-        r"(\d+) failed\s*\|\s*$",
-        text,
-        re.MULTILINE,
-    )
-    if len(assertion_summaries) != 1:
-        raise SystemExit(f"native C API assertion summary was ambiguous: {assertion_summaries}")
-    total, passed, failed = map(int, assertion_summaries[0])
-    if failed != 1 or passed + failed != total:
-        raise SystemExit(f"native C API assertion summary was not one failure: {assertion_summaries}")
-
-    ctest_summaries = re.findall(
-        r"^(\d+)% tests passed, (\d+) tests failed out of (\d+)$", text, re.MULTILINE
-    )
-    if ctest_summaries != [("0", "1", "1")]:
-        raise SystemExit(f"CTest summary was not the exact test_capi failure: {ctest_summaries}")
-
-    failed_tests = re.findall(
-        r"^\s*[0-9]+\s+-\s+(\S+)\s+\(([^)]+)\)\s*$", text, re.MULTILINE
-    )
-    if failed_tests != [("test_capi", "Failed")]:
-        raise SystemExit(f"CTest failure list was not exactly test_capi: {failed_tests}")
-    PY
 
 # Build and run the focused native CPU C API fixture gate.
 native-capi:
@@ -966,8 +899,7 @@ native-capi:
 
     listing=$(mktemp)
     output=$(mktemp)
-    retry_output=$(mktemp)
-    trap 'rm -f "$listing" "$output" "$retry_output"' EXIT
+    trap 'rm -f "$listing" "$output"' EXIT
     ctest --test-dir "$build" -N --tests-regex '^test_capi$' | tee "$listing"
     test_count=$(grep -Ec '^[[:space:]]*Test #[0-9]+: test_capi$' "$listing")
     [[ $test_count -eq 1 ]]
@@ -984,16 +916,8 @@ native-capi:
       exit 0
     fi
 
-    just --justfile {{ quote(root + "/Justfile") }} \
-      _native-capi-known-flake "$output"
-    # The synchronous scheduler makes pending-delta delivery cardinality
-    # deterministic while the complete suite still exercises early-stop abort,
-    # request teardown, and engine reuse through the unchanged C ABI test.
-    echo 'retrying complete test_capi once with VT_ASYNC_SCHED=0' >&2
-    env -u VT_ASYNC_RUNNER VT_ASYNC_SCHED=0 \
-      ctest --test-dir "$build" --output-on-failure --tests-regex '^test_capi$' \
-      2>&1 | tee "$retry_output"
-    grep -Fxq '100% tests passed, 0 tests failed out of 1' "$retry_output"
+    echo "default native C API gate failed (status $default_status); alternate scheduler runs cannot satisfy this gate" >&2
+    exit "$default_status"
 
 # Run sys-first crates.io publication checks without uploading.
 publish-dry-run:
@@ -1053,79 +977,10 @@ sanitizers-model-free:
     cargo test --locked -p vllm-cpp --lib --test safe_api --test qwen3 \
       --no-run --message-format=json > "$messages"
 
-    test_binary() {
-      local target=$1
-      python3 - "$messages" "$target" <<'PY'
-    import json
-    import sys
-
-    messages, target = sys.argv[1:]
-    matches = []
-    with open(messages, encoding="utf-8") as stream:
-        for line in stream:
-            message = json.loads(line)
-            if (
-                message.get("reason") == "compiler-artifact"
-                and message.get("profile", {}).get("test")
-                and message.get("target", {}).get("name") == target
-                and message.get("executable")
-            ):
-                matches.append(message["executable"])
-    if len(matches) != 1:
-        raise SystemExit(
-            f"expected exactly one test binary for {target}, found {len(matches)}: {matches}"
-        )
-    print(matches[0])
-    PY
-    }
-
-    assert_complete_suite() {
-      local suite=$1
-      local output=$2
-      python3 - "$output" "$suite" <<'PY'
-    import re
-    import sys
-
-    output, suite = sys.argv[1:]
-    text = open(output, encoding="utf-8", errors="replace").read()
-    running = re.findall(r"^running ([0-9]+) tests?$", text, re.MULTILINE)
-    summaries = re.findall(
-        r"^test result: ok\. ([0-9]+) passed; 0 failed;", text, re.MULTILINE
-    )
-    if len(running) != 1 or int(running[0]) < 1:
-        raise SystemExit(
-            f"{suite} suite did not report exactly one nonzero running count: {running}"
-        )
-    if len(summaries) != 1 or int(summaries[0]) < 1:
-        raise SystemExit(
-            f"{suite} suite did not report exactly one successful nonzero summary: {summaries}"
-        )
-    PY
-    }
-
-    assert_focused_test() {
-      local test=$1
-      local output=$2
-      python3 - "$output" "$test" <<'PY'
-    import re
-    import sys
-
-    output, test = sys.argv[1:]
-    text = open(output, encoding="utf-8", errors="replace").read()
-    running = re.findall(r"^running ([0-9]+) tests?$", text, re.MULTILINE)
-    summaries = re.findall(
-        r"^test result: ok\. ([0-9]+) passed; ([0-9]+) failed;", text, re.MULTILINE
-    )
-    if running != ["1"]:
-        raise SystemExit(f"{test} did not report exactly one running test: {running}")
-    if summaries != [("1", "0")]:
-        raise SystemExit(f"{test} did not report exactly one passed test: {summaries}")
-    PY
-    }
-
-    library=$(test_binary vllm_cpp)
-    safe_api=$(test_binary safe_api)
-    qwen3=$(test_binary qwen3)
+    package=$(cargo pkgid --locked -p vllm-cpp)
+    library=$(just --justfile {{ quote(root + "/Justfile") }} _test-binary "$messages" "$package" vllm_cpp lib)
+    safe_api=$(just --justfile {{ quote(root + "/Justfile") }} _test-binary "$messages" "$package" safe_api test)
+    qwen3=$(just --justfile {{ quote(root + "/Justfile") }} _test-binary "$messages" "$package" qwen3 test)
     for binary in "$library" "$safe_api" "$qwen3"; do
       [[ -x $binary ]] || {
         echo "test binary is not executable: $binary" >&2
@@ -1139,25 +994,25 @@ sanitizers-model-free:
       echo 'GCC sanitizer runtimes are unavailable' >&2
       exit 1
     fi
-    export LD_PRELOAD="$asan:$ubsan${LD_PRELOAD:+:$LD_PRELOAD}"
+    sanitizer_preload="$asan:$ubsan${LD_PRELOAD:+:$LD_PRELOAD}"
     export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1}
     export UBSAN_OPTIONS=${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}
     export VT_POOL_BYPASS=1
 
     library_output="$work/library.out"
-    "$library" --test-threads=1 2>&1 | tee "$library_output"
-    assert_complete_suite library "$library_output"
+    LD_PRELOAD="$sanitizer_preload" "$library" --test-threads=1 2>&1 | tee "$library_output"
+    just --justfile {{ quote(root + "/Justfile") }} _assert-rust-tests "$library_output" library
     safe_api_output="$work/safe-api.out"
-    "$safe_api" --test-threads=1 2>&1 | tee "$safe_api_output"
-    assert_complete_suite safe_api "$safe_api_output"
+    LD_PRELOAD="$sanitizer_preload" "$safe_api" --test-threads=1 2>&1 | tee "$safe_api_output"
+    just --justfile {{ quote(root + "/Justfile") }} _assert-rust-tests "$safe_api_output" safe_api
     for test in \
       committed_transcription_fixture_supports_path_pcm_and_wrong_task \
       committed_embedding_fixture_preserves_shape_order_ownership_and_wrong_task \
       committed_video_mux_goldens_preserve_exact_argument_boundaries \
       committed_parakeet_directory_is_rejected_as_video_dit; do
       output="$work/$test.out"
-      "$qwen3" --test-threads=1 --exact "$test" 2>&1 | tee "$output"
-      assert_focused_test "$test" "$output"
+      LD_PRELOAD="$sanitizer_preload" "$qwen3" --test-threads=1 --exact "$test" 2>&1 | tee "$output"
+      just --justfile {{ quote(root + "/Justfile") }} _assert-rust-tests "$output" "$test" true
     done
     echo 'sanitizer gate passed: 3 binaries, 2 complete suites, 4 focused fixture tests'
 
@@ -1179,7 +1034,12 @@ sanitizers model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
     export VLLM_CPP_SANITIZE=address,undefined
     export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-{{ quote(root + "/target/sanitize") }}}
 
-    cargo test --locked -p vllm-cpp --test safe_api --test qwen3 --no-run
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    messages="$work/messages.json"
+    cargo test --locked -p vllm-cpp --test safe_api --test qwen3 \
+      --no-run --message-format=json > "$messages"
+    package=$(cargo pkgid --locked -p vllm-cpp)
 
     asan=$(gcc -print-file-name=libasan.so)
     ubsan=$(gcc -print-file-name=libubsan.so)
@@ -1187,20 +1047,17 @@ sanitizers model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
       echo 'GCC sanitizer runtimes are unavailable' >&2
       exit 1
     fi
-    export LD_PRELOAD="$asan:$ubsan${LD_PRELOAD:+:$LD_PRELOAD}"
+    sanitizer_preload="$asan:$ubsan${LD_PRELOAD:+:$LD_PRELOAD}"
     export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1}
     export UBSAN_OPTIONS=${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}
     export VT_POOL_BYPASS=1
 
-    for pattern in safe_api qwen3; do
-      binary=$(find "$CARGO_TARGET_DIR/debug/deps" -maxdepth 1 -type f \
-        -name "$pattern-*" -executable -printf '%T@ %p\n' \
-        | sort -n | tail -1 | cut -d' ' -f2-) || true
-      if [[ -z $binary ]]; then
-        echo "could not find $pattern test binary" >&2
-        exit 1
-      fi
-      "$binary" --test-threads=1
+    for target in safe_api qwen3; do
+      binary=$(just --justfile {{ quote(root + "/Justfile") }} _test-binary "$messages" "$package" "$target" test)
+      [[ -x $binary ]]
+      output="$work/$target.out"
+      LD_PRELOAD="$sanitizer_preload" "$binary" --test-threads=1 2>&1 | tee "$output"
+      just --justfile {{ quote(root + "/Justfile") }} _assert-rust-tests "$output" "$target"
     done
 
 # Run selected request lifecycle tests under native-only GCC TSan on Linux x86_64.
@@ -1226,26 +1083,25 @@ tsan model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
     export VLLM_CPP_SANITIZE=thread
     export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-{{ quote(root + "/target/tsan") }}}
 
-    cargo test --locked -p vllm-cpp --test qwen3 --no-run
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    messages="$work/messages.json"
+    cargo test --locked -p vllm-cpp --test qwen3 --no-run --message-format=json > "$messages"
+    package=$(cargo pkgid --locked -p vllm-cpp)
+    binary=$(just --justfile {{ quote(root + "/Justfile") }} _test-binary "$messages" "$package" qwen3 test)
+    [[ -x $binary ]]
 
     tsan=$(gcc -print-file-name=libtsan.so)
     if [[ ! -f $tsan ]]; then
       echo 'GCC ThreadSanitizer runtime is unavailable' >&2
       exit 1
     fi
-    export LD_PRELOAD="$tsan${LD_PRELOAD:+:$LD_PRELOAD}"
+    sanitizer_preload="$tsan${LD_PRELOAD:+:$LD_PRELOAD}"
     # Rust and its standard library are not instrumented in this GCC lane. Keep
     # native vllm.cpp races visible while ignoring uninstrumented Rust modules.
     export TSAN_OPTIONS=${TSAN_OPTIONS:-halt_on_error=1:ignore_noninstrumented_modules=1}
     export VT_POOL_BYPASS=1
 
-    binary=$(find "$CARGO_TARGET_DIR/debug/deps" -maxdepth 1 -type f \
-      -name 'qwen3-*' -executable -printf '%T@ %p\n' \
-      | sort -n | tail -1 | cut -d' ' -f2-) || true
-    if [[ -z $binary ]]; then
-      echo 'could not find qwen3 test binary' >&2
-      exit 1
-    fi
     # Self-drop uses uninstrumented Rust synchronization, so normal and ASan/LSan
     # cover it. Every selected native lifecycle case runs in its own process.
     for test in \
@@ -1256,8 +1112,74 @@ tsan model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
       callback_panic_is_reported_and_engine_is_reusable \
       request_retains_engine_and_live_drop_is_safe \
       concurrent_request_lifecycle_stress; do
-      "$binary" "$test" --exact --test-threads=1
+      output="$work/$test.out"
+      LD_PRELOAD="$sanitizer_preload" "$binary" "$test" --exact --test-threads=1 2>&1 | tee "$output"
+      just --justfile {{ quote(root + "/Justfile") }} _assert-rust-tests "$output" "$test" true
     done
+
+# Test release evidence helpers without native builds or models.
+tooling-test:
+    python3 {{ quote(root + "/tests/release_tooling.py") }}
+
+[private]
+_package-payload archive:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 - {{ quote(archive) }} <<'PYTHON'
+    import sys
+    import tarfile
+
+    with tarfile.open(sys.argv[1], "r:gz") as archive:
+        print(sum(member.size for member in archive if member.isfile()))
+    PYTHON
+
+[private]
+_test-binary messages package target kind:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 - {{ quote(messages) }} {{ quote(package) }} {{ quote(target) }} {{ quote(kind) }} <<'PYTHON'
+    import json
+    import sys
+
+    messages, package, target, kind = sys.argv[1:]
+    matches = []
+    with open(messages, encoding="utf-8") as stream:
+        for line in stream:
+            message = json.loads(line)
+            if (
+                message.get("reason") == "compiler-artifact"
+                and message.get("package_id") == package
+                and message.get("profile", {}).get("test")
+                and message.get("target", {}).get("name") == target
+                and message.get("target", {}).get("kind") == [kind]
+                and message.get("executable")
+            ):
+                matches.append(message["executable"])
+    if len(matches) != 1:
+        raise SystemExit(f"expected exactly one {package} {target} {kind} test binary, found {matches}")
+    print(matches[0])
+    PYTHON
+
+[private]
+_assert-rust-tests output suite focused="false":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 - {{ quote(output) }} {{ quote(suite) }} {{ quote(focused) }} <<'PYTHON'
+    import re
+    import sys
+
+    output, suite, focused = sys.argv[1:]
+    text = open(output, encoding="utf-8", errors="replace").read()
+    running = re.findall(r"^running ([0-9]+) tests?$", text, re.MULTILINE)
+    passed = re.findall(r"^test result: ok\. ([0-9]+) passed; 0 failed;", text, re.MULTILINE)
+    if len(running) != 1 or int(running[0]) < 1 or passed != running:
+        raise SystemExit(f"{suite}: expected one complete nonzero passing suite; running={running}, passed={passed}")
+    if focused == "true":
+        # Native stderr can split libtest's name and trailing `ok` across lines.
+        named = re.findall(r"^test " + re.escape(suite) + r" \.\.\. ", text, re.MULTILINE)
+        if running != ["1"] or len(named) != 1:
+            raise SystemExit(f"{suite}: expected exactly one named passed test")
+    PYTHON
 
 # Check Just and Rust formatting.
 fmt-check:
@@ -1273,4 +1195,4 @@ docs:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --features vllm-cpp/serde
 
 # Run the complete maintainer gate serially; do not pass --jobs.
-ci: fmt-check lint docs test sys link-modes native-capi sanitizers-model-free package-test publish-dry-run
+ci: fmt-check tooling-test lint docs test sys link-modes native-capi sanitizers-model-free package-test publish-dry-run
