@@ -13,7 +13,9 @@ use vllm_cpp_sys as ffi;
 use crate::callback::{StreamControl, StreamEvent};
 use crate::engine::{Engine, EngineInner};
 use crate::error::{status_result, Error};
-use crate::params::{to_cstring, LogitsProcessorRegistration, SamplingParams};
+use crate::params::{
+    discard_panic_payload, lock_unpoisoned, to_cstring, LogitsProcessorRegistration, SamplingParams,
+};
 
 /// How a successfully waited non-blocking request ended.
 ///
@@ -377,30 +379,11 @@ unsafe extern "C" fn async_callback_trampoline(
     state.record_result(result, finished)
 }
 
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 struct CleanupJob {
-    state: CleanupState,
-    context: CleanupContext,
-}
-
-enum CleanupContext {
-    Caller,
-    Reaper,
-}
-
-enum CleanupState {
-    Armed {
-        raw: NonNull<ffi::vllm_request>,
-        callback: Box<AsyncCallbackState>,
-        logits_processor: Option<LogitsProcessorRegistration>,
-        engine: Arc<EngineInner>,
-    },
-    Disarmed,
+    raw: NonNull<ffi::vllm_request>,
+    callback: Box<AsyncCallbackState>,
+    logits_processor: Option<LogitsProcessorRegistration>,
+    engine: Arc<EngineInner>,
 }
 
 impl CleanupJob {
@@ -411,122 +394,85 @@ impl CleanupJob {
         engine: Arc<EngineInner>,
     ) -> Self {
         Self {
-            state: CleanupState::Armed {
-                raw,
-                callback,
-                logits_processor,
-                engine,
-            },
-            context: CleanupContext::Caller,
-        }
-    }
-
-    fn run(mut self) {
-        self.finish();
-    }
-
-    fn finish(&mut self) {
-        if matches!(self.state, CleanupState::Disarmed) {
-            return;
-        }
-        let needs_deferral = match self.context {
-            CleanupContext::Caller => match &self.state {
-                CleanupState::Armed {
-                    callback,
-                    logits_processor,
-                    ..
-                } => {
-                    callback.is_delivery_thread()
-                        || logits_processor
-                            .as_ref()
-                            .is_some_and(LogitsProcessorRegistration::is_active_on_current_thread)
-                }
-                CleanupState::Disarmed => return,
-            },
-            // A successfully sent job is owned only by the prestarted Rust reaper,
-            // so it cannot be running in the native request callback.
-            CleanupContext::Reaper => false,
-        };
-        if needs_deferral {
-            self.defer_to_reaper();
-        } else if let Err(payload) = catch_unwind(AssertUnwindSafe(|| self.cleanup_now())) {
-            // Retrying free after a Rust unwind could double-free an opaque void
-            // native operation. Disarm and leak the unknown remainder instead.
-            self.leak_armed();
-            std::mem::forget(payload);
-        }
-    }
-
-    fn cleanup_now(&mut self) {
-        let state = std::mem::replace(&mut self.state, CleanupState::Disarmed);
-        let CleanupState::Armed {
             raw,
             callback,
             logits_processor,
             engine,
-        } = state
-        else {
-            return;
-        };
-        // If this function unwinds, forget every owner before CleanupJob::Drop can
-        // run. Repeating an opaque void free could double-free, while releasing
-        // callback/engine without a known join would be unsafe.
-        let mut owners = std::mem::ManuallyDrop::new((callback, logits_processor, engine));
-        // ABI coupling: output delivery records its permanent thread ID, while
-        // logits calls record their active thread. This path cannot free from either
-        // callback context. New native user_data entrypoints must join this tracking.
-        //
-        // SAFETY: this job owns the request once and retains its callback and engine.
-        // Native free cancels the request and joins output delivery before the logits
-        // processor registration is removed.
-        unsafe { ffi::vllm_request_free(raw.as_ptr()) };
-        // SAFETY: output delivery and native request teardown are complete.
-        let (callback, logits_processor, engine) =
-            unsafe { std::mem::ManuallyDrop::take(&mut owners) };
-        // User callback captures and a stored panic payload can have arbitrary
-        // destructors. Never let them unwind out of cleanup.
-        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(callback))) {
-            std::mem::forget(payload);
         }
-        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(logits_processor))) {
-            std::mem::forget(payload);
-        }
-        drop(engine);
     }
 
-    fn leak_armed(&mut self) {
-        let state = std::mem::replace(&mut self.state, CleanupState::Disarmed);
-        std::mem::forget(state);
+    fn run(self) {
+        if self.needs_deferral() {
+            self.defer();
+        } else {
+            self.free();
+        }
     }
 
-    fn defer_to_reaper(&mut self) {
+    // request_free joins output delivery only; avoid both its callback thread and
+    // the currently active logits thread before transferring ownership to reaper.
+    fn needs_deferral(&self) -> bool {
+        self.callback.is_delivery_thread()
+            || self
+                .logits_processor
+                .as_ref()
+                .is_some_and(LogitsProcessorRegistration::is_active_on_current_thread)
+    }
+
+    fn defer(self) {
         let sender = match CLEANUP_REAPER.get() {
             Some(Ok(sender)) => sender,
             // Submission starts the process-lifetime reaper before native code
             // can create a request. Without it, self-thread cleanup is impossible.
             _ => std::process::abort(),
         };
-        let job = Self {
-            state: std::mem::replace(&mut self.state, CleanupState::Disarmed),
-            context: CleanupContext::Reaper,
-        };
-        if let Err(error) = sender.send(job) {
-            // SendError owns the still-live native handle. Its Drop would recurse
-            // here on the callback thread and eventually release callback/engine
-            // before native join, so leak it and terminate instead.
+        if let Err(error) = sender.send(self) {
+            // Dropping this error would drop the callback, logits processor, and
+            // engine while the raw handle is live, before native free joins delivery.
+            // Forget it and abort rather than run those destructors in this terminal state.
             std::mem::forget(error);
             std::process::abort();
         }
     }
+
+    fn free(self) {
+        let Self {
+            raw,
+            callback,
+            logits_processor,
+            engine,
+        } = self;
+        // Keep all Rust owners alive until request_free has returned. If it unwinds,
+        // the native handle's state is unknown, so retain them without retrying cleanup.
+        let mut owners = std::mem::ManuallyDrop::new((callback, logits_processor, engine));
+        // SAFETY: the unique job owner calls free once, off both protected callback
+        // contexts, and retains the callback, processor registration, and engine.
+        let free_result = catch_unwind(AssertUnwindSafe(|| unsafe {
+            ffi::vllm_request_free(raw.as_ptr())
+        }));
+        if let Err(payload) = free_result {
+            discard_panic_payload(payload);
+            return;
+        }
+
+        // SAFETY: free returned after joining output delivery; the owners were kept
+        // in ManuallyDrop until that point.
+        let (callback, logits_processor, engine) =
+            unsafe { std::mem::ManuallyDrop::take(&mut owners) };
+        drop_cleanup_owners(callback, logits_processor, engine);
+    }
 }
 
-impl Drop for CleanupJob {
-    fn drop(&mut self) {
-        // This is the ownership backstop: every caller-side armed drop either
-        // frees and joins or transfers all owners to the reaper; a reaper-owned
-        // drop always completes cleanup locally, so send failure cannot recurse.
-        self.finish();
+fn drop_cleanup_owners<C, L, E>(callback: C, logits_processor: L, engine: E) {
+    // User captures and stored panic payloads can have arbitrary destructors.
+    // Contain each panic so later owners are still released, with engine last.
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(callback))) {
+        discard_panic_payload(payload);
     }
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(logits_processor))) {
+        discard_panic_payload(payload);
+    }
+    drop(engine);
 }
 
 // The job transfers unique native-handle ownership to the reaper. Its callback
@@ -553,5 +499,49 @@ fn cleanup_sender() -> Result<&'static mpsc::Sender<CleanupJob>, Error> {
         Err(message) => Err(Error::Runtime {
             message: format!("failed to start request cleanup reaper: {message}"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::drop_cleanup_owners;
+
+    struct DropProbe {
+        name: &'static str,
+        drops: Arc<Mutex<Vec<&'static str>>>,
+        panic: bool,
+    }
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.drops.lock().unwrap().push(self.name);
+            if self.panic {
+                panic!("probe destructor panic");
+            }
+        }
+    }
+
+    #[test]
+    fn owner_drop_panics_do_not_skip_later_owners() {
+        for (callback_panics, logits_panics) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let drops = Arc::new(Mutex::new(Vec::new()));
+            let probe = |name, panic| DropProbe {
+                name,
+                drops: Arc::clone(&drops),
+                panic,
+            };
+
+            drop_cleanup_owners(
+                probe("callback", callback_panics),
+                Some(probe("logits", logits_panics)),
+                probe("engine", false),
+            );
+
+            assert_eq!(*drops.lock().unwrap(), ["callback", "logits", "engine"]);
+        }
     }
 }

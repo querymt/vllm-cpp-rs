@@ -605,13 +605,13 @@ fn valid_slice_layout<T>(pointer: *const T, length: usize) -> bool {
         && length <= (isize::MAX as usize) / size_of::<T>()
 }
 
-fn discard_panic_payload(payload: Box<dyn std::any::Any + Send>) {
+pub(crate) fn discard_panic_payload(payload: Box<dyn std::any::Any + Send>) {
     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
         std::mem::forget(payload);
     }
 }
 
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -646,7 +646,7 @@ fn optional_u32_to_i32(value: Option<u32>, field: &'static str) -> Result<i32, E
     }
 }
 
-fn u32_to_i32(value: u32, field: &'static str) -> Result<i32, Error> {
+pub(crate) fn u32_to_i32(value: u32, field: &'static str) -> Result<i32, Error> {
     i32::try_from(value)
         .map_err(|_| invalid_configuration(format!("{field} exceeds native i32 range")))
 }

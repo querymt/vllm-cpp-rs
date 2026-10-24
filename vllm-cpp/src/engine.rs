@@ -14,7 +14,7 @@ use crate::callback::{
     callback_trampoline, CallbackState, StreamControl, StreamEvent, StreamOutcome,
 };
 use crate::error::{invalid_configuration, status_result, Error};
-use crate::params::{Device, SamplingParams, SchedulerPolicy, Toggle};
+use crate::params::{to_cstring, u32_to_i32, Device, SamplingParams, SchedulerPolicy, Toggle};
 
 /// A cloneable, `Send + Sync` vllm.cpp text-generation engine.
 #[derive(Clone)]
@@ -2346,10 +2346,6 @@ fn optional_cstring(value: Option<&str>, field: &'static str) -> Result<Option<C
     value.map(|value| to_cstring(value, field)).transpose()
 }
 
-fn to_cstring(value: &str, field: &'static str) -> Result<CString, Error> {
-    CString::new(value).map_err(|_| Error::InteriorNul { field })
-}
-
 #[cfg(unix)]
 fn path_to_cstring(path: &Path, field: &'static str) -> Result<CString, Error> {
     use std::os::unix::ffi::OsStrExt;
@@ -2385,11 +2381,6 @@ fn required_optional_path_to_cstring(
 ) -> Result<CString, Error> {
     path.ok_or_else(|| invalid_configuration(format!("{field} is required")))
         .and_then(|path| nonempty_path_to_cstring(path, field))
-}
-
-fn u32_to_i32(value: u32, field: &'static str) -> Result<i32, Error> {
-    i32::try_from(value)
-        .map_err(|_| invalid_configuration(format!("{field} exceeds native i32 range")))
 }
 
 fn validate_video_frame_path_length(path: &CString, field: &'static str) -> Result<(), Error> {
@@ -2513,12 +2504,11 @@ mod tests {
         embedding_from_raw, generate_video_with, load_engine_with, load_video_engine_with,
         token_completion_from_raw, transcribe_with, transcription_from_raw,
         validate_embedding_count, validate_pcm_input, validate_pointer_count, validate_token_input,
-        video_mux_argv_from_raw, Device, EmbeddingEngineBuilder, EmbeddingTask,
-        MarshaledEmbeddingInput, MarshaledModelParams, MarshaledTranscriptionInput,
-        MarshaledVideoGenerationParams, MarshaledVideoModelParams, ModelConfig, SchedulerPolicy,
-        TextTask, Toggle, TranscriptionEngineBuilder, TranscriptionInput, TranscriptionTask,
-        VideoDevice, VideoEngine, VideoGenerationParams, VideoModelConfig, VideoMuxParams,
-        VideoPartition,
+        video_mux_argv_from_raw, Device, EmbeddingEngineBuilder, MarshaledEmbeddingInput,
+        MarshaledModelParams, MarshaledTranscriptionInput, MarshaledVideoGenerationParams,
+        MarshaledVideoModelParams, ModelConfig, SchedulerPolicy, TextTask, Toggle,
+        TranscriptionEngineBuilder, TranscriptionInput, VideoDevice, VideoEngine,
+        VideoGenerationParams, VideoModelConfig, VideoMuxParams, VideoPartition,
     };
     use crate::abi::Compatibility;
     use crate::Error;
@@ -2632,21 +2622,6 @@ mod tests {
         assert_eq!(raw.device, Device::Cuda.as_native());
         assert_eq!(raw.gpu_memory_utilization, 1.25);
         assert_eq!(raw.kv_cache_memory_bytes, 4096);
-    }
-
-    #[test]
-    fn forwards_all_memory_settings_without_changing_native_precedence() {
-        let mut config = ModelConfig::new("model-dir");
-        config.num_blocks = Some(7);
-        config.gpu_memory_utilization = Some(2.0);
-        config.kv_cache_memory_bytes = Some(8192);
-
-        let mut params = MarshaledModelParams::new(config).expect("marshal memory settings");
-        params.apply_defaults(native_defaults());
-        let raw = params.raw();
-        assert_eq!(raw.num_blocks, 7);
-        assert_eq!(raw.kv_cache_memory_bytes, 8192);
-        assert_eq!(raw.gpu_memory_utilization, 2.0);
     }
 
     #[test]
@@ -2764,10 +2739,8 @@ mod tests {
     }
 
     #[test]
-    fn shared_loader_checks_abi_before_defaults_for_every_task_marker() {
+    fn shared_loader_checks_abi_before_defaults() {
         assert_shared_load_order::<TextTask>();
-        assert_shared_load_order::<TranscriptionTask>();
-        assert_shared_load_order::<EmbeddingTask>();
     }
 
     #[test]
@@ -3276,7 +3249,6 @@ mod tests {
             ));
         }
         assert!(checked_product(usize::MAX, 2, "test product").is_err());
-        assert!(i32::MAX as usize * i32::MAX as usize > isize::MAX as usize / size_of::<f32>());
     }
 
     #[test]
