@@ -341,12 +341,6 @@ fn validate_cutlass(
             root.display()
         ))
     })?;
-    if !canonical.is_absolute() {
-        return Err(ConfigError::new(format!(
-            "VLLM_CPP_CUTLASS_DIR must resolve to an absolute path; got {}",
-            canonical.display()
-        )));
-    }
 
     for relative in ["include/cutlass/cutlass.h", "include/cutlass/version.h"] {
         let path = canonical.join(relative);
@@ -423,12 +417,6 @@ fn validate_mlx(inputs: &Inputs, probe: &impl PathProbe) -> Result<Option<PathBu
             root.display()
         ))
     })?;
-    if !canonical.is_absolute() {
-        return Err(ConfigError::new(format!(
-            "MLX_ROOT must resolve to an absolute path; got {}",
-            canonical.display()
-        )));
-    }
 
     for relative in [
         "include/mlx/array.h",
