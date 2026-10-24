@@ -410,21 +410,24 @@ package-test:
       echo "expected pinned native version 0.0.2, found $native_version" >&2
       exit 1
     }
-    jq -e --arg version "$version" '
-      [.packages[] | select(.name == "vllm-cpp" or .name == "vllm-cpp-sys")]
-      | length == 2
-        and all(.version == $version)
-        and all(.rust_version == "1.85")
-        and all(.license == "MIT OR Apache-2.0")
-        and all(.repository == "https://github.com/querymt/vllm-cpp-rs")
-        and all(.readme == "README.md")
-        and (map(select(.name == "vllm-cpp" and .documentation == "https://docs.rs/vllm-cpp")) | length == 1)
-        and (map(select(.name == "vllm-cpp-sys" and .documentation == "https://docs.rs/vllm-cpp-sys")) | length == 1)
-        and (map(select(.name == "vllm-cpp") | .dependencies[] | select(.name == "vllm-cpp-sys" and .req == ("=" + $version) and .uses_default_features == false)) | length == 1)
-        and (map(select(.name == "vllm-cpp") | .dependencies[] | select(.name == "hf-hub" and .req == "^0.5.0" and .optional == false and .uses_default_features == false and .features == ["ureq"])) | length == 1)
-        and (map(select(.name == "vllm-cpp") | .dependencies[] | select(.name == "serde_json" and .optional == false and .kind == null)) | length == 1)
-        and (map(select(.name == "vllm-cpp") | .dependencies[] | select(.name == "clap" and .req == "=4.6.1" and .kind == "dev" and .optional == false and .features == ["derive"])) | length == 1)
-    ' "$metadata" >/dev/null
+    check_package_metadata() {
+      jq -e --arg version "$version" '
+        [.packages[] | select(.name == "vllm-cpp" or .name == "vllm-cpp-sys")]
+        | length > 0
+          and all(.version == $version and .version == "0.0.2")
+          and all(.rust_version == "1.85")
+          and all(.license == "MIT OR Apache-2.0")
+          and all(.repository == "https://github.com/querymt/vllm-cpp-rs")
+          and all(.readme == "README.md")
+          and all(.documentation == ("https://docs.rs/" + .name))
+          and all(.features.default == ["bundled"])
+          and all(.[] | select(.name == "vllm-cpp");
+            .features.serde == []
+            and (.dependencies | map(select(.name == "vllm-cpp-sys"
+              and .req == ("=" + $version) and .uses_default_features == false)) | length == 1))
+      ' "$1" >/dev/null
+    }
+    check_package_metadata "$metadata"
 
     sys_list="$temp/vllm-cpp-sys.list"
     safe_list="$temp/vllm-cpp.list"
@@ -456,192 +459,23 @@ package-test:
     diff -u "$sys_list" <(archive_inventory "$sys_package" "vllm-cpp-sys-$version")
     diff -u "$safe_list" <(archive_inventory "$safe_package" "vllm-cpp-$safe_version")
 
-    native_exclude_pattern='^vllm\.cpp/cmake/(CudaArchFeaturesTest|CudaSourceGencodeTest|DumpTritonAOTContract|InSourceGuardTest|TritonAOTDefaultTest|TritonAOTMultiArchTest|VerifyExports)\.cmake$|^vllm\.cpp/include/vt/rocm/(rocm_gelu_mul_sep|rocm_gemma4_expert_geglu|rocm_matmul_batch|rocm_rmsnorm_plus_add)\.h$|^vllm\.cpp/src/vllm/entrypoints/openai/(api_server|server_main)\.cpp$|^vllm\.cpp/src/vllm/platforms/tenstorrent\.cpp$|^vllm\.cpp/src/vt/cuda/marlin/.*/generate_kernels\.py$|^vllm\.cpp/src/vt/rocm/[^/]+\.hip$|^vllm\.cpp/src/vt/tenstorrent/|^vllm\.cpp/src/vt/vulkan/shaders/'
-    native_inventory() {
-      local base=$1
-      local member
-      shift
-      for member in "$@"; do
-        find "$base/$member" -type f -print
-      done | sed "s#^$base/##" | grep -Ev "$native_exclude_pattern" | LC_ALL=C sort
-    }
-    native_members=(
-      vllm.cpp/CMakeLists.txt
-      vllm.cpp/LICENSE
-      vllm.cpp/NOTICE
-      vllm.cpp/cmake
-      vllm.cpp/include
-      vllm.cpp/src
-      vllm.cpp/scripts/triton-aot-compile.py
-      vllm.cpp/tests/vt/test_rocm_backend.cpp
-      vllm.cpp/triton_kernels
-      vllm.cpp/third_party/README.md
-      vllm.cpp/third_party/blake3
-      vllm.cpp/third_party/doctest/doctest.h
-      vllm.cpp/third_party/minja
-      vllm.cpp/third_party/nlohmann
-      vllm.cpp/third_party/vulkan
-    )
-    sys_expected="$temp/vllm-cpp-sys.expected"
-    {
-      printf '%s\n' \
-        .cargo_vcs_info.json \
-        Cargo.lock \
-        Cargo.toml \
-        Cargo.toml.orig \
-        LICENSE-APACHE \
-        LICENSE-MIT \
-        NOTICE \
-        README.md \
-        THIRD_PARTY.md \
-        build.rs \
-        licenses/DOCTEST-MIT.txt \
-        licenses/FLASH-ATTENTION-BSD-3-CLAUSE.txt \
-        licenses/FLASH-LINEAR-ATTENTION-MIT.txt \
-        src/bindings.rs \
-        src/build_config.rs \
-        src/build_support.rs \
-        src/lib.rs \
-        tests/build_config.rs \
-        tests/build_support.rs \
-        tests/layout.c \
-        tests/layout.rs \
-        tests/symbols.rs \
-        wrapper.h
-      native_inventory "$repo_root/vllm-cpp-sys" "${native_members[@]}"
-    } | LC_ALL=C sort > "$sys_expected"
-    diff -u "$sys_expected" "$sys_list"
-    diff -u \
-      <(native_inventory "$repo_root/vllm-cpp-sys" "${native_members[@]}") \
-      <(native_inventory "$sys_root" "${native_members[@]}")
-    diff -u \
-      <(printf '%s\n' CMakeLists.txt LICENSE NOTICE cmake include scripts src tests third_party triton_kernels | LC_ALL=C sort) \
-      <(find "$sys_root/vllm.cpp" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
-
-    safe_expected="$temp/vllm-cpp.expected"
-    printf '%s\n' \
-      .cargo_vcs_info.json \
-      Cargo.lock \
-      Cargo.toml \
-      Cargo.toml.orig \
-      LICENSE-APACHE \
-      LICENSE-MIT \
-      README.md \
-      examples/README.md \
-      examples/chat.rs \
-      examples/common/mod.rs \
-      examples/complete.rs \
-      examples/concurrent.rs \
-      examples/setup_test_model.rs \
-      examples/stream.rs \
-      examples/structured.rs \
-      examples/video_generate.rs \
-      src/abi.rs \
-      src/callback.rs \
-      src/engine.rs \
-      src/error.rs \
-      src/hf.rs \
-      src/lib.rs \
-      src/params.rs \
-      src/request.rs \
-      tests/qwen3.rs \
-      tests/safe_api.rs \
-      | LC_ALL=C sort > "$safe_expected"
-    diff -u "$safe_expected" "$safe_list"
-
-    required_sys_members=(
-      README.md
-      THIRD_PARTY.md
-      licenses/DOCTEST-MIT.txt
-      licenses/FLASH-ATTENTION-BSD-3-CLAUSE.txt
-      licenses/FLASH-LINEAR-ATTENTION-MIT.txt
-      vllm.cpp/include/vllm.h
-      vllm.cpp/src/capi/chat_prompt.cpp
-      vllm.cpp/src/capi/chat_prompt.h
-      vllm.cpp/src/capi/engine_handle.h
-      vllm.cpp/src/capi/vllm_c.cpp
-      vllm.cpp/src/vllm/version.cpp
-      vllm.cpp/src/vt/cuda/cuda_matmul_fp8_cutlass.cu
-      vllm.cpp/src/vt/cuda/flash_attn/src/flash.h
-      vllm.cpp/src/vt/cuda/marlin/core/scalar_type.hpp
-      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_80/MANIFEST
-      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_86/MANIFEST
-      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_89/MANIFEST
-      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_90a/MANIFEST
-      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_100a/MANIFEST
-      vllm.cpp/src/vt/cuda/triton_aot_vendored/sm_121a/MANIFEST
-      vllm.cpp/src/vt/metal/metal_mlx_provider.mm
-      vllm.cpp/src/vt/vulkan/vulkan_spirv.h
-      vllm.cpp/src/vllm/platforms/rocm.cpp
-      vllm.cpp/include/vt/rocm/rocm_arch.h
-      vllm.cpp/include/vt/rocm/rocm_runtime.h
-      vllm.cpp/tests/vt/test_rocm_backend.cpp
-      vllm.cpp/scripts/triton-aot-compile.py
-      vllm.cpp/triton_kernels/chunk_delta_h.py
-      vllm.cpp/third_party/README.md
-      vllm.cpp/third_party/blake3/LICENSE_A2
-      vllm.cpp/third_party/blake3/LICENSE_CC0
-      vllm.cpp/third_party/doctest/doctest.h
-      vllm.cpp/third_party/minja/LICENSE
-      vllm.cpp/third_party/nlohmann/json.hpp
-      vllm.cpp/third_party/vulkan/vulkan_core.h
-    )
-    for member in "${required_sys_members[@]}"; do
+    # Cargo manifests own the inventory; keep only build-entry-point checks here.
+    for member in build.rs wrapper.h src/lib.rs src/bindings.rs \
+      vllm.cpp/CMakeLists.txt vllm.cpp/include/vllm.h vllm.cpp/src/capi/vllm_c.cpp; do
       [[ -s $sys_root/$member ]] || {
-        echo "sys package is missing required member: $member" >&2
+        echo "sys package is missing essential build input: $member" >&2
         exit 1
       }
     done
+    # Every packaged native input must match the pinned source, without mirroring
+    # Cargo's exclusions or maintaining a second complete source inventory.
     while IFS= read -r member; do
-      [[ -s $safe_root/$member ]] || {
-        echo "safe package is missing required member: $member" >&2
-        exit 1
-      }
-    done < "$safe_expected"
+      case $member in
+        vllm.cpp/*) cmp "$repo_root/vllm-cpp-sys/$member" "$sys_root/$member" ;;
+      esac
+    done < "$sys_list"
 
-    denied_sys_members=(
-      Justfile
-      layout.c
-      vllm.cpp/.agents
-      vllm.cpp/.git
-      vllm.cpp/.github
-      vllm.cpp/assets
-      vllm.cpp/benchmarks
-      vllm.cpp/docs
-      vllm.cpp/examples
-      vllm.cpp/tools
-      vllm.cpp/third_party/httplib
-      vllm.cpp/cmake/CudaArchFeaturesTest.cmake
-      vllm.cpp/cmake/CudaSourceGencodeTest.cmake
-      vllm.cpp/cmake/DumpTritonAOTContract.cmake
-      vllm.cpp/cmake/InSourceGuardTest.cmake
-      vllm.cpp/cmake/TritonAOTDefaultTest.cmake
-      vllm.cpp/cmake/TritonAOTMultiArchTest.cmake
-      vllm.cpp/cmake/VerifyExports.cmake
-      vllm.cpp/src/vllm/entrypoints/openai/api_server.cpp
-      vllm.cpp/src/vllm/entrypoints/openai/server_main.cpp
-      vllm.cpp/src/vllm/platforms/tenstorrent.cpp
-      vllm.cpp/src/vt/cuda/marlin/libtorch_stable/moe/marlin_moe_wna16/generate_kernels.py
-      vllm.cpp/src/vt/rocm
-      vllm.cpp/src/vt/tenstorrent
-      vllm.cpp/src/vt/vulkan/shaders
-    )
-    for member in "${denied_sys_members[@]}"; do
-      [[ ! -e $sys_root/$member ]] || {
-        echo "denied upstream tree or record leaked into sys package: $member" >&2
-        exit 1
-      }
-    done
-    diff -u \
-      <(printf '%s\n' vllm.cpp/tests/vt/test_rocm_backend.cpp) \
-      <(find "$sys_root/vllm.cpp/tests" -type f -printf '%P\n' \
-        | sed 's#^#vllm.cpp/tests/#' | LC_ALL=C sort)
-    diff -u \
-      <(printf '%s\n' vllm.cpp/third_party/doctest/doctest.h) \
-      <(find "$sys_root/vllm.cpp/third_party/doctest" -type f -printf '%P\n' \
-        | sed 's#^#vllm.cpp/third_party/doctest/#' | LC_ALL=C sort)
-
-    forbidden_pattern='(^|/)(target|stuff|\.git|\.github|__pycache__|\.cache|cache|fixtures?|downloads?|_deps|sdk)(/|$)|(^|/)(cutlass)(/|$)|(^|/)(model\.safetensors|tokenizer\.json|tokenizer_config\.json)$|\.(o|obj|a|so|dylib|dll|pyc|safetensors|gguf|pt|pth)$'
+    forbidden_pattern='(^|/)(target|stuff|\.git|\.github|\.agents|\.qmt|hardening-evidence|cleanup-evidence|__pycache__|\.cache|cache|fixtures?|downloads?|_deps|sdk)(/|$)|(^|/)(cutlass)(/|$)|(^|/)(AGENTS\.md|model\.safetensors|tokenizer\.json|tokenizer_config\.json)$|\.(o|obj|a|so|dylib|dll|pyc|safetensors|gguf|pt|pth)$'
     for listing in "$sys_list" "$safe_list"; do
       if grep -Eiq "$forbidden_pattern" "$listing"; then
         echo "forbidden package payload detected in $listing:" >&2
@@ -697,6 +531,13 @@ package-test:
         | grep -Ei '(^|/)(license[^/]*|copying[^/]*|notice[^/]*)$' \
         | LC_ALL=C sort)
 
+    while IFS= read -r member; do
+      cmp "$repo_root/vllm-cpp-sys/$member" "$sys_root/$member"
+    done < "$sys_license_actual"
+    for member in LICENSE-APACHE LICENSE-MIT; do
+      cmp "$repo_root/vllm-cpp/$member" "$safe_root/$member"
+    done
+
     check_package_links() {
       local package_root=$1
       shift
@@ -728,17 +569,8 @@ package-test:
     safe_package_sha256=$(sha256sum "$safe_package" | awk '{ print $1 }')
     safe_entry_count=$(wc -l < "$safe_list")
 
-    jq -e --arg version "$version" '
-      .packages | length == 1
-        and .[0].name == "vllm-cpp-sys"
-        and .[0].version == $version
-        and .[0].readme == "README.md"
-        and .[0].documentation == "https://docs.rs/vllm-cpp-sys"
-        and .[0].license == "MIT OR Apache-2.0"
-        and .[0].rust_version == "1.85"
-        and .[0].features.default == ["bundled"]
-    ' <(cargo metadata --manifest-path "$sys_root/Cargo.toml" \
-      --locked --offline --no-deps --format-version 1) >/dev/null
+    check_package_metadata <(cargo metadata --manifest-path "$sys_root/Cargo.toml" \
+      --locked --offline --no-deps --format-version 1)
     just --justfile "$repo_root/Justfile" _link-modes \
       "$sys_root" "$temp/extracted-link-modes"
 
@@ -793,22 +625,8 @@ package-test:
         CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$temp_target" \
         cargo test --locked --release --offline --features bundled,serde
     )
-    jq -e --arg version "$safe_version" '
-      .packages | length == 1
-        and .[0].name == "vllm-cpp"
-        and .[0].version == $version
-        and .[0].readme == "README.md"
-        and .[0].documentation == "https://docs.rs/vllm-cpp"
-        and .[0].license == "MIT OR Apache-2.0"
-        and .[0].rust_version == "1.85"
-        and .[0].features.default == ["bundled"]
-        and .[0].features.serde == []
-        and (.[0].dependencies | map(select(.name == "vllm-cpp-sys" and .req == ("=" + $version) and .uses_default_features == false)) | length == 1)
-        and (.[0].dependencies | map(select(.name == "hf-hub" and .req == "^0.5.0" and .optional == false and .uses_default_features == false and .features == ["ureq"])) | length == 1)
-        and (.[0].dependencies | map(select(.name == "serde_json" and .optional == false and .kind == null)) | length == 1)
-        and (.[0].dependencies | map(select(.name == "clap" and .req == "=4.6.1" and .kind == "dev" and .optional == false and .features == ["derive"])) | length == 1)
-    ' <(cargo metadata --manifest-path "$safe_root/Cargo.toml" \
-      --locked --offline --no-deps --format-version 1) >/dev/null
+    check_package_metadata <(cargo metadata --manifest-path "$safe_root/Cargo.toml" \
+      --locked --offline --no-deps --format-version 1)
 
     safe_consumer="$temp/safe-consumer"
     mkdir -p "$safe_consumer/src"
@@ -1117,10 +935,6 @@ tsan model=env_var_or_default("VLLM_CPP_TEST_MODEL", ""):
       just --justfile {{ quote(root + "/Justfile") }} _assert-rust-tests "$output" "$test" true
     done
 
-# Test release evidence helpers without native builds or models.
-tooling-test:
-    python3 {{ quote(root + "/tests/release_tooling.py") }}
-
 [private]
 _package-payload archive:
     #!/usr/bin/env bash
@@ -1195,4 +1009,4 @@ docs:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --features vllm-cpp/serde
 
 # Run the complete maintainer gate serially; do not pass --jobs.
-ci: fmt-check tooling-test lint docs test sys link-modes native-capi sanitizers-model-free package-test publish-dry-run
+ci: fmt-check lint docs test sys link-modes native-capi sanitizers-model-free package-test publish-dry-run

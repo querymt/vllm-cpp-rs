@@ -9,7 +9,7 @@ Rust bindings for [vllm.cpp](https://github.com/mudler/vllm.cpp), organized as:
 
 > **Work in progress:** these bindings track a pinned vllm.cpp release and may lag later upstream APIs or backend behavior. Check the exact native identity and support boundary before adoption.
 
-The safe crate covers text completion, streaming, raw-JSON and optional serde chat, concurrent requests, structured output, custom logits processing, pre-tokenized completion, transcription, embeddings, video generation, and standalone video-mux argument composition. It also includes a synchronous Hugging Face resolver and text-focused examples. The sys crate exposes the complete 35-function stable C boundary at ABI 17 with checked-in generated bindings and C/Rust conformance checks.
+The safe crate covers text completion, streaming, raw-JSON and optional serde chat, concurrent requests, structured output, custom logits processing, pre-tokenized completion, transcription, embeddings, video generation, and standalone video-mux argument composition. It also includes a synchronous Hugging Face resolver, text examples, and a minimal local-checkpoint video example. The sys crate exposes the complete 35-function stable C boundary at ABI 17 with checked-in generated bindings and C/Rust conformance checks.
 
 The native source is independently pinned to vllm.cpp tag `v0.0.2`, commit `7020de93652ca920424a10ac5255b34810dd2f24`. Native Linux x86_64 CPU is the supported runtime target, including bundled/system and static/dynamic linking. Linux ARM64, Apple ARM64, CUDA, external CUTLASS, Triton AOT, Vulkan, Metal, and external MLX are configured build or optional validation surfaces; they are not accelerator runtime-support claims.
 
@@ -57,11 +57,11 @@ Text `Engine` is a cloneable `Send + Sync` RAII owner. It provides blocking comp
 
 `VideoEngine` separately owns a MiniMax-H3 checkpoint set and performs exclusive blocking generation. Video device numbering is `Cpu=0` and `Cuda=1`, with no `Auto`; explicit CUDA never falls back. Generation writes frame/audio artifacts, may leave stale or partial output, and trusts caller paths without sandboxing. `VideoMuxParams` and `VideoMuxArgv` only compose ordered `OsString` argument boundaries. This crate never executes ffmpeg, an HTTP server, or another process; `vllm_server_main` remains available only through the raw crate.
 
-The high-level crate intentionally adds no tokenizer, task-query, raw-handle, process-execution, or HTTP-server wrapper. See [the examples guide](vllm-cpp/examples/README.md) for the intentionally text-focused binaries. Release-facing changes are recorded in the [changelog](CHANGELOG.md), and maintainers use the manual [release process](RELEASING.md).
+The high-level crate intentionally adds no tokenizer, task-query, raw-handle, process-execution, or HTTP-server wrapper. See [the examples guide](vllm-cpp/examples/README.md) for text binaries and the experimental local-checkpoint video example. Release-facing changes are recorded in the [changelog](CHANGELOG.md), and maintainers use the manual [release process](RELEASING.md).
 
 ## Build and Test
 
-Inside the Nix shell, use the root `Justfile` (requires Just 1.40 or newer) for maintainer workflows:
+Use the root `Justfile` (requires Just 1.40 or newer) for maintainer workflows, optionally inside the Nix shell:
 
 ```console
 CMAKE_GENERATOR=Ninja cargo build --locked --release
@@ -131,21 +131,13 @@ cargo package -p vllm-cpp --locked --list
 just package-test
 ```
 
-The package gate reports file counts, compressed sizes, payload bytes, and SHA-256 hashes as diagnostics only; neither crate has an arbitrary numeric package size or file-count cap. Payload bytes are the sum of regular archive member sizes, not filesystem-dependent extracted directory sizes. It validates deterministic inventories for both crates, package metadata, required source/docs/examples/tests/licenses/native inputs, forbidden payloads, and license provenance. It extracts and tests both crates offline, then runs independent sys and safe downstream consumers; the safe consumer resolves both extracted crates rather than this workspace. The sys package carries only native build inputs and required licenses/notices; upstream tests, large fixtures, media, benchmarks, fetched SDKs, external CUTLASS trees, and agent records are excluded.
-
-`just publish-dry-run` performs a sys-then-safe workspace packaging dry-run without uploading; it uses `--no-verify` to avoid the pre-publication registry cycle. As required by [RELEASING.md](RELEASING.md), after `vllm-cpp-sys` is available from crates.io, run the full `cargo publish -p vllm-cpp --locked --dry-run` verification before publishing the safe crate.
-
-## Validation Boundary
-
-Mandatory candidate evidence is Linux x86_64 CPU and model-free: formatting, release-tooling regressions, lint, docs, workspace tests, generated-binding/header/layout/signature/ABI/exact-export checks, all four CPU link modes, native C API fixtures, ASan/UBSan/leak checks over committed fixtures, package extraction/downstream checks, publication dry-run, and exact MSRV validation.
-
-`just native-capi` preserves the default scheduler result with `VT_ASYNC_SCHED` and `VT_ASYNC_RUNNER` unset. A failing default fixture blocks the candidate; a separate synchronous diagnostic run cannot make it green. Callback cardinality is not token cardinality. Dirty-tree development passes are not a substitute for independently approved clean-commit validation in [RELEASING.md](RELEASING.md).
-
-Prepared Qwen inference/sanitizers, native-only TSan, successful Rust MiniMax-H3 generation, Miri, Linux ARM64, Apple ARM64, Vulkan, CUDA/CUTLASS/Triton, Metal/MLX, and accelerator runtime are optional or deferred lanes. The manual platform workflows are configuration, not exact-candidate evidence unless separately dispatched and recorded.
+Cargo manifests define package contents. The gate compares archives with `cargo package --list`, checks metadata, essential native inputs, licenses and forbidden payloads, then runs offline extracted tests, four extracted sys link modes, and independent sys and safe downstream consumers. File counts, compressed sizes, regular-file payload bytes and SHA-256 hashes are diagnostics only, with no arbitrary caps.
 
 ## Support
 
-Native Linux x86_64 CPU is the supported runtime family. All accelerator features remain experimental build/configuration surfaces. Cross-platform compile or workflow configuration alone does not establish runtime support.
+Native Linux x86_64 CPU is the supported runtime family. `just ci` runs the mandatory model-free gates; the exact MSRV check is separate. See [RELEASING.md](RELEASING.md) for the complete checklist and sys-first publication process, including full registry-resolved safe dry-run verification.
+
+Model-free tests do not establish prepared-model inference or successful MiniMax-H3 generation. Accelerator runtime, other platforms, prepared-model sanitizers, TSan and Miri remain optional or deferred. Configured workflows and successful compilation alone are not runtime-support evidence.
 
 ## Licensing and Affiliation
 

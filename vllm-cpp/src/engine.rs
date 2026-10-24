@@ -2142,7 +2142,6 @@ fn transcription_from_raw(raw: &ffi::vllm_transcription) -> Result<Transcription
     };
     let token_count = usize::try_from(raw.n_token_ids)
         .map_err(|_| invalid_native_output("transcription token count", "count is negative"))?;
-    validate_pointer_count(raw.token_ids, token_count, "transcription token IDs")?;
     let token_ids = checked_copy_slice(raw.token_ids, token_count, "transcription token IDs")?;
     Ok(Transcription { text, token_ids })
 }
@@ -2228,7 +2227,6 @@ fn embedding_from_raw(
     }
     let prompt_tokens = native_count_to_u32(raw.prompt_tokens, "embedding prompt token count")?;
     let value_count = checked_product(rows, dimension, "embedding values")?;
-    validate_pointer_count(raw.values, value_count, "embedding values")?;
     let values = checked_copy_slice(raw.values, value_count, "embedding values")?;
     Ok(EmbeddingResult {
         values,
