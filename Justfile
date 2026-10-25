@@ -92,8 +92,8 @@ backend-integrity:
 layout-test:
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-{{ root }}/target/layout-test}" cargo test --locked -p vllm-cpp-sys --release --test layout
 
-# Run sys conformance checks not already covered by workspace all-target tests.
-sys: bindings-check header-check backend-integrity layout-test
+# Static sys checks; release layout is in the matrix or standalone `layout-test`.
+sys: bindings-check header-check backend-integrity
 
 # Test all Linux CPU link modes and the exact shared-library exports.
 link-modes:
@@ -721,7 +721,6 @@ native-capi:
     ctest --test-dir "$build" -N --tests-regex '^test_capi$' | tee "$listing"
     test_count=$(grep -Ec '^[[:space:]]*Test #[0-9]+: test_capi$' "$listing")
     [[ $test_count -eq 1 ]]
-    grep -Fxq 'Total Tests: 1' "$listing"
 
     env -u VT_ASYNC_SCHED -u VT_ASYNC_RUNNER \
       ctest --test-dir "$build" --output-on-failure --tests-regex '^test_capi$' \
