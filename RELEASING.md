@@ -29,7 +29,7 @@ Nix is optional. Prepared-Qwen inference/sanitizers, native-only TSan, Rust Mini
 
 ## Publish
 
-`just publish-dry-run` performs package verification followed by a workspace Cargo dry-run with `--no-verify` to avoid the registry dependency cycle. It does not upload crates or tag a release, and it is not the full registry-resolved safe-crate dry-run. Publish sys first, wait until it is available, then fully verify the safe crate against registry sys `0.0.2` before its upload:
+`just publish-dry-run` runs only a workspace Cargo publish dry-run with `--no-verify` to avoid the registry dependency cycle; it does not verify packages, upload crates, or tag a release. `just ci` runs package verification separately through `just package-test`. This is not the full registry-resolved safe-crate dry-run. Publish sys first, wait until it is available, then fully verify the safe crate against registry sys `0.0.2` before its upload:
 
 ```console
 cargo publish -p vllm-cpp-sys --locked
@@ -37,4 +37,4 @@ cargo publish -p vllm-cpp --locked --dry-run
 cargo publish -p vllm-cpp --locked
 ```
 
-After explicit publication, verify registry metadata, docs.rs, licenses, and a clean downstream build before tagging the published commit. Published versions are immutable: never replace a version with different bytes. Check registry state before retrying a failed safe upload; yanking does not make a version reusable.
+After explicit publication, verify registry metadata, docs.rs, licenses, and a clean downstream build before tagging the published commit. Published versions are immutable: never replace a version with different bytes, and do not retry once a version is accepted. If an upload result is unknown, unavailable, or ambiguous, diagnose registry state until acceptance is known. Retry only a transient failure confirmed absent from the registry, using the unchanged previously validated contents; otherwise prepare a new coordinated version. Yanking does not make a version reusable.

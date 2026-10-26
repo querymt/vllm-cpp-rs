@@ -54,7 +54,7 @@ Backend features are bundled-only, have explicit platform and prerequisite rules
 
 Cargo manifests define package contents. `just package-test` compares archives with `cargo package --list`, checks metadata, native inputs, licenses and forbidden payloads, then tests extracted crates and independent downstream consumers offline. File counts, compressed sizes, payload bytes, and SHA-256 values are diagnostics, not caps.
 
-`just publish-dry-run` performs package verification and a workspace Cargo dry-run with `--no-verify` to avoid the registry dependency cycle. It does not upload crates or create tags, and it does not replace the full registry-resolved safe-crate dry-run after the sys crate is available. See [RELEASING.md](RELEASING.md) for the sys-first release sequence and exact gates.
+`just publish-dry-run` runs only a workspace Cargo publish dry-run with `--no-verify` to avoid the registry dependency cycle. It does not upload crates or create tags. `just ci` runs package verification separately through `just package-test`. This dry-run does not replace the full registry-resolved safe-crate dry-run after the sys crate is available. See [RELEASING.md](RELEASING.md) for the sys-first release sequence and exact gates.
 
 ## Licensing and affiliation
 
