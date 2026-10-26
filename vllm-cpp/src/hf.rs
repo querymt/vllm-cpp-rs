@@ -3,7 +3,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use hf_hub::api::sync::ApiBuilder;
+use hf_hub::api::sync::{Api, ApiBuilder};
 use hf_hub::api::RepoInfo;
 use hf_hub::{Cache, Repo, RepoType};
 use serde_json::Value;
@@ -191,19 +191,69 @@ impl HuggingFaceModel {
         filename: &str,
     ) -> Result<PathBuf, HuggingFaceError> {
         let api = self
-            .api_builder(cache)
+            .api_builder(cache.clone())
             .build()
             .map_err(|error| hub(format!("could not create API: {error}")))?;
-        let path = api
-            .repo(self.requested_repo())
+        self.resolve_gguf_with_api(&cache, &api, filename)
+    }
+
+    fn resolve_gguf_with_api(
+        &self,
+        cache: &Cache,
+        api: &Api,
+        filename: &str,
+    ) -> Result<PathBuf, HuggingFaceError> {
+        let info = api.repo(self.requested_repo()).info().map_err(|error| {
+            hub(format!(
+                "could not read metadata for `{}` at `{}`: {error}",
+                self.repo_id, self.revision
+            ))
+        })?;
+        let sha = info.sha.trim();
+        // A path-safe branch name is still mutable, so require a full commit ID.
+        if !is_full_commit_sha(sha) {
+            return Err(incomplete("repository metadata has an invalid commit SHA"));
+        }
+        if is_full_commit_sha(&self.revision) && !sha.eq_ignore_ascii_case(&self.revision) {
+            return Err(incomplete(
+                "repository metadata differs from the requested commit",
+            ));
+        }
+        let pinned_repo =
+            Repo::with_revision(self.repo_id.clone(), RepoType::Model, sha.to_owned());
+        let result = api
+            .repo(pinned_repo.clone())
             .get(filename)
             .map_err(|error| {
                 hub(format!(
-                    "could not resolve `{filename}` from `{}` at `{}`: {error}",
-                    self.repo_id, self.revision
+                    "could not resolve `{filename}` from `{}` at `{sha}`: {error}",
+                    self.repo_id
+                ))
+            })
+            .and_then(|path| {
+                verify_gguf_path(&path, filename)?;
+                verify_snapshot_paths(&HashMap::from([(filename.to_owned(), path.clone())]), sha)?;
+                Ok(path)
+            });
+        if result.is_err() {
+            // hf-hub writes refs/<sha> before returning, even for a wrong snapshot.
+            // Restore only that immutable identity, never a stale mutable alias.
+            cache.repo(pinned_repo).create_ref(sha).map_err(|error| {
+                io_error(format!(
+                    "could not restore pinned cache ref `{sha}`: {error}"
                 ))
             })?;
-        verify_gguf_path(&path, filename)?;
+        }
+        let path = result?;
+        cache
+            .repo(self.requested_repo())
+            .create_ref(sha)
+            .map_err(|error| {
+                io_error(format!(
+                    "could not update cache ref `{}` for `{}`: {error}",
+                    self.revision, self.repo_id
+                ))
+            })?;
         Ok(path)
     }
 
@@ -290,6 +340,13 @@ impl HuggingFaceModel {
                     ))
                 })?;
                 let snapshot = snapshot_for_cached_revision(cache, &self.requested_repo())?;
+                if is_full_commit_sha(&self.revision)
+                    && !snapshot_sha(&snapshot)?.eq_ignore_ascii_case(&self.revision)
+                {
+                    return Err(incomplete(
+                        "cached snapshot differs from the requested commit",
+                    ));
+                }
                 verify_gguf_path(&path, filename)?;
                 if path.parent() != Some(snapshot.as_path()) {
                     return Err(incomplete(format!(
@@ -508,6 +565,10 @@ fn verify_gguf_path(path: &Path, filename: &str) -> Result<(), HuggingFaceError>
         )));
     }
     Ok(())
+}
+
+fn is_full_commit_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn snapshot_sha(snapshot: &Path) -> Result<&str, HuggingFaceError> {
@@ -731,6 +792,365 @@ mod tests {
 
     fn cache_fixture(files: &[(&str, &[u8])]) -> TempDir {
         cache_fixture_at(DEFAULT_REVISION, files)
+    }
+
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    const MOVED: &str = "abcdef0123456789abcdef0123456789abcdef01";
+
+    struct MockHub {
+        endpoint: String,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MockHub {
+        fn new(info_sha: &str, download_sha: &str) -> Self {
+            Self::with_download_hook(info_sha, download_sha, || {})
+        }
+
+        fn with_download_hook(
+            info_sha: &str,
+            download_sha: &str,
+            hook: impl FnOnce() + Send + 'static,
+        ) -> Self {
+            use std::io::{BufRead, Write};
+            use std::sync::{atomic::AtomicBool, Arc, Mutex};
+            use std::time::{Duration, Instant};
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let seen = Arc::clone(&requests);
+            let done = Arc::clone(&stop);
+            let info_sha = info_sha.to_owned();
+            let download_sha = download_sha.to_owned();
+            let mut hook = Some(hook);
+            let worker = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !done.load(Ordering::Acquire) && Instant::now() < deadline {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(error) => panic!("mock accept: {error}"),
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut reader = std::io::BufReader::new(&stream);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let path = line.split_whitespace().nth(1).unwrap().to_owned();
+                    let mut range = String::new();
+                    loop {
+                        line.clear();
+                        reader.read_line(&mut line).unwrap();
+                        if line == "\r\n" || line.is_empty() {
+                            break;
+                        }
+                        if let Some((key, value)) = line.split_once(':') {
+                            if key.eq_ignore_ascii_case("range") {
+                                range = value.trim().to_owned();
+                            }
+                        }
+                    }
+                    seen.lock().unwrap().push((path.clone(), range.clone()));
+                    let (body, headers) = if path.starts_with("/api/") {
+                        (
+                            serde_json::json!({"sha": info_sha, "siblings": [{"rfilename": "model.gguf"}]}).to_string(),
+                            "Content-Type: application/json\r\n".to_owned(),
+                        )
+                    } else if range == "bytes=0-0" {
+                        if let Some(hook) = hook.take() {
+                            hook();
+                        }
+                        (
+                            "r".to_owned(),
+                            format!("x-repo-commit: {download_sha}\r\netag: \"blob-a\"\r\nContent-Range: bytes 0-0/10\r\n"),
+                        )
+                    } else {
+                        // A mutable branch has moved since metadata was fetched.
+                        let body = if path.contains(COMMIT) {
+                            "revision-a"
+                        } else {
+                            "revision-b"
+                        };
+                        (body.to_owned(), String::new())
+                    };
+                    write!(stream, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
+                }
+            });
+            Self {
+                endpoint,
+                requests,
+                stop,
+                worker: Some(worker),
+            }
+        }
+
+        fn api(&self, cache: Cache) -> Api {
+            ApiBuilder::from_cache(cache)
+                .with_endpoint(self.endpoint.clone())
+                .with_token(None)
+                .with_progress(false)
+                .with_retries(0)
+                .build()
+                .unwrap()
+        }
+    }
+
+    impl Drop for MockHub {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            self.worker.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[test]
+    fn gguf_online_pins_metadata_and_body_and_preserves_offline_ref() {
+        let temp = TempDir::new();
+        let cache = Cache::new(temp.0.clone());
+        let server = MockHub::new(COMMIT, COMMIT);
+        let model = HuggingFaceModel::gguf(REPO, "model.gguf")
+            .revision(REVISION)
+            .cache_dir(&temp.0);
+        let path = model
+            .resolve_gguf_with_api(&cache, &server.api(cache.clone()), "model.gguf")
+            .unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"revision-a",
+            "mutable body must not poison the old commit cache"
+        );
+        assert_eq!(snapshot_sha(path.parent().unwrap()).unwrap(), COMMIT);
+        let expected_url = format!("/{REPO}/resolve/{COMMIT}/model.gguf");
+        assert_eq!(
+            *server.requests.lock().unwrap(),
+            vec![
+                (
+                    format!("/api/models/{REPO}/revision/{REVISION}"),
+                    String::new()
+                ),
+                (expected_url.clone(), "bytes=0-0".to_owned()),
+                (expected_url, "bytes=0-".to_owned()),
+            ]
+        );
+        assert_eq!(model.offline(true).resolve().unwrap(), path);
+    }
+
+    #[test]
+    fn gguf_online_reuses_pinned_cache_and_updates_requested_ref() {
+        let temp = TempDir::new();
+        let cache = Cache::new(temp.0.clone());
+        let pinned = cache.repo(Repo::with_revision(
+            REPO.to_owned(),
+            RepoType::Model,
+            COMMIT.to_owned(),
+        ));
+        pinned.create_ref(COMMIT).unwrap();
+        fs::create_dir_all(pinned.pointer_path(COMMIT)).unwrap();
+        fs::write(pinned.pointer_path(COMMIT).join("model.gguf"), b"cached-a").unwrap();
+        let server = MockHub::new(COMMIT, COMMIT);
+        let model = HuggingFaceModel::gguf(REPO, "model.gguf")
+            .revision(REVISION)
+            .cache_dir(&temp.0);
+        let path = model
+            .resolve_gguf_with_api(&cache, &server.api(cache.clone()), "model.gguf")
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"cached-a");
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+        assert_eq!(model.offline(true).resolve().unwrap(), path);
+    }
+
+    #[test]
+    fn gguf_online_rejects_invalid_commit_and_mismatched_download_snapshot() {
+        for sha in ["", "../unsafe", "main", COMMIT] {
+            let temp = TempDir::new();
+            let cache = Cache::new(temp.0.clone());
+            let server = MockHub::new(sha, MOVED);
+            let model = HuggingFaceModel::gguf(REPO, "model.gguf")
+                .revision(REVISION)
+                .cache_dir(&temp.0);
+            let result =
+                model.resolve_gguf_with_api(&cache, &server.api(cache.clone()), "model.gguf");
+            assert!(
+                matches!(result, Err(HuggingFaceError::Incomplete { .. })),
+                "{sha}: {result:?}"
+            );
+            assert!(matches!(
+                model.offline(true).resolve(),
+                Err(HuggingFaceError::CacheMiss { .. })
+            ));
+            assert_eq!(
+                server.requests.lock().unwrap().len(),
+                if sha == COMMIT { 3 } else { 1 }
+            );
+        }
+    }
+
+    #[test]
+    fn gguf_explicit_sha_rejected_download_cannot_poison_offline() {
+        let temp = TempDir::new();
+        let cache = Cache::new(temp.0.clone());
+        let server = MockHub::new(COMMIT, MOVED);
+        let model = HuggingFaceModel::gguf(REPO, "model.gguf")
+            .revision(COMMIT)
+            .cache_dir(&temp.0);
+        assert_incomplete_contains(
+            model.resolve_gguf_with_api(&cache, &server.api(cache.clone()), "model.gguf"),
+            "snapshots/",
+        );
+        assert!(model.offline(true).resolve().is_err());
+        let ref_path = temp.0.join("models--owner--model/refs").join(COMMIT);
+        assert_ne!(fs::read_to_string(ref_path).unwrap(), MOVED);
+        assert_eq!(server.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn gguf_rejected_download_preserves_valid_ref_and_other_cached_file() {
+        for revision in [COMMIT, REVISION] {
+            let temp = TempDir::new();
+            let cache = Cache::new(temp.0.clone());
+            let model = HuggingFaceModel::gguf(REPO, "model.gguf")
+                .revision(revision)
+                .cache_dir(&temp.0);
+            let requested = cache.repo(model.requested_repo());
+            requested.create_ref(COMMIT).unwrap();
+            let snapshot = requested.pointer_path(COMMIT);
+            fs::create_dir_all(&snapshot).unwrap();
+            fs::write(snapshot.join("other.gguf"), b"keep-me").unwrap();
+            let server = MockHub::new(COMMIT, MOVED);
+            assert_incomplete_contains(
+                model.resolve_gguf_with_api(&cache, &server.api(cache.clone()), "model.gguf"),
+                "snapshots/",
+            );
+            let ref_path = temp.0.join("models--owner--model/refs").join(revision);
+            assert_eq!(fs::read_to_string(ref_path).unwrap(), COMMIT);
+            assert_eq!(fs::read(snapshot.join("other.gguf")).unwrap(), b"keep-me");
+            let other = HuggingFaceModel::gguf(REPO, "other.gguf")
+                .revision(revision)
+                .cache_dir(&temp.0)
+                .offline(true);
+            assert_eq!(other.resolve().unwrap(), snapshot.join("other.gguf"));
+            assert!(model.offline(true).resolve().is_err());
+            assert_eq!(server.requests.lock().unwrap().len(), 3);
+        }
+    }
+
+    #[test]
+    fn gguf_explicit_sha_rejects_different_metadata_without_touching_refs() {
+        let temp = TempDir::new();
+        let cache = Cache::new(temp.0.clone());
+        let model = HuggingFaceModel::gguf(REPO, "model.gguf")
+            .revision(COMMIT)
+            .cache_dir(&temp.0);
+        let requested = cache.repo(model.requested_repo());
+        requested.create_ref(COMMIT).unwrap();
+        let snapshot = requested.pointer_path(COMMIT);
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::write(snapshot.join("model.gguf"), b"keep-me").unwrap();
+        let server = MockHub::new(MOVED, MOVED);
+        assert_incomplete_contains(
+            model.resolve_gguf_with_api(&cache, &server.api(cache.clone()), "model.gguf"),
+            "requested commit",
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            model.offline(true).resolve().unwrap(),
+            snapshot.join("model.gguf")
+        );
+        assert_eq!(fs::read(snapshot.join("model.gguf")).unwrap(), b"keep-me");
+        assert!(!temp
+            .0
+            .join("models--owner--model/refs")
+            .join(MOVED)
+            .exists());
+    }
+
+    #[test]
+    fn gguf_explicit_sha_offline_rejects_wrong_ref_and_still_requires_ref() {
+        let temp = TempDir::new();
+        let cache = Cache::new(temp.0.clone());
+        let model = HuggingFaceModel::gguf(REPO, "model.gguf")
+            .revision(COMMIT)
+            .cache_dir(&temp.0)
+            .offline(true);
+        let requested = cache.repo(model.requested_repo());
+        requested.create_ref(MOVED).unwrap();
+        let snapshot = requested.pointer_path(MOVED);
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::write(snapshot.join("model.gguf"), b"wrong-commit").unwrap();
+        assert_incomplete_contains(model.resolve(), "requested commit");
+        let correct = requested.pointer_path(COMMIT);
+        fs::create_dir_all(&correct).unwrap();
+        fs::write(correct.join("model.gguf"), b"right-commit").unwrap();
+        fs::remove_file(temp.0.join("models--owner--model/refs").join(COMMIT)).unwrap();
+        assert!(matches!(
+            model.resolve(),
+            Err(HuggingFaceError::CacheMiss { .. })
+        ));
+    }
+
+    #[test]
+    fn gguf_explicit_sha_download_cache_reuse_and_offline_agree() {
+        let temp = TempDir::new();
+        let cache = Cache::new(temp.0.clone());
+        let server = MockHub::new(COMMIT, COMMIT);
+        let model = HuggingFaceModel::gguf(REPO, "model.gguf")
+            .revision(COMMIT)
+            .cache_dir(&temp.0);
+        let api = server.api(cache.clone());
+        let path = model
+            .resolve_gguf_with_api(&cache, &api, "model.gguf")
+            .unwrap();
+        assert_eq!(snapshot_sha(path.parent().unwrap()).unwrap(), COMMIT);
+        assert_eq!(fs::read(&path).unwrap(), b"revision-a");
+        assert_eq!(
+            model
+                .resolve_gguf_with_api(&cache, &api, "model.gguf")
+                .unwrap(),
+            path
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 4);
+        assert_eq!(model.offline(true).resolve().unwrap(), path);
+    }
+
+    #[test]
+    fn gguf_rejected_download_does_not_roll_back_mutable_alias() {
+        let temp = TempDir::new();
+        let cache = Cache::new(temp.0.clone());
+        let model = HuggingFaceModel::gguf(REPO, "model.gguf")
+            .revision(REVISION)
+            .cache_dir(&temp.0);
+        let requested = cache.repo(model.requested_repo());
+        requested.create_ref(COMMIT).unwrap();
+        let snapshot = requested.pointer_path(MOVED);
+        fs::create_dir_all(&snapshot).unwrap();
+        fs::write(snapshot.join("other.gguf"), b"newer-alias").unwrap();
+        // Another resolver updates the alias after info(), before download returns.
+        let server = MockHub::with_download_hook(COMMIT, MOVED, move || {
+            requested.create_ref(MOVED).unwrap();
+        });
+        assert_incomplete_contains(
+            model.resolve_gguf_with_api(&cache, &server.api(cache.clone()), "model.gguf"),
+            "snapshots/",
+        );
+        assert_eq!(
+            snapshot_for_cached_revision(&cache, &model.requested_repo()).unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            fs::read(snapshot.join("other.gguf")).unwrap(),
+            b"newer-alias"
+        );
     }
 
     #[test]

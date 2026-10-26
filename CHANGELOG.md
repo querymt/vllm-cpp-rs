@@ -6,12 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ## [0.0.2] - 2026-08-27
 
+This entry describes the release candidate; it does not authorize or attest publication.
+
 ### Changed
 
 - Pinned bundled native vllm.cpp to tag `v0.0.2`, commit `7020de93652ca920424a10ac5255b34810dd2f24`, moving the stable C contract from ABI 10 with 19 functions to ABI 17 with 35 functions; system libraries must match the new ABI, layouts, signatures, and exports.
 - Model construction now obtains native defaults and overlays only explicit Rust settings, preserving helper defaults including `block_size=32`, `max_num_seqs=32`, and `gpu_memory_utilization=0.92`.
 - Hardened deterministic backend configuration, binding/export/package checks, package curation, and multi-architecture Triton packaging: all six vendored AOT trees are embedded, exact-SM dispatched, and paired with portable fallback on other accepted targets.
-- Raised the safe crate unpacked package limit to 512 KiB while retaining its 40-file and 128-KiB compressed limits; sys limits remain 1,400 files, 40 MiB unpacked, and 6 MiB compressed.
+- Removed arbitrary package size and file-count caps for both crates. File counts, compressed sizes, regular-file payload sums, and SHA-256 hashes remain diagnostics, not release limits; exact inventories and all content, provenance, extracted-build, and downstream compatibility checks remain required.
+- Contained the entire Rust logits-processor trampoline lifetime, including final capture destruction after concurrent registration teardown, while preserving callback panic reporting and panic-payload disposal.
+- Pinned online GGUF metadata and body retrieval to a validated immutable commit; explicit full-SHA requests reject different metadata or offline snapshots. Validate downloads before explicitly updating requested refs, and repair hf-hub's implicit pinned-SHA ref writes on rejection without rolling back mutable aliases. Offline resolution still requires a cache ref; mutable `main` remains the default requested revision.
+- Native C API fixture failures now retain the default scheduler's failing status; an alternate scheduler run cannot make the gate pass. Callback counts are not token counts, so the upstream callback-count assertion alone does not establish token loss.
+- Optional ASan/UBSan and native-only TSan recipes select exact package/target test executables from Cargo JSON, reject empty suites, and require each exact TSan filter to pass one named test. Removed the stale release number from the CUDA/Vulkan conflict diagnostic.
 
 ### Added
 
@@ -19,7 +25,7 @@ All notable changes to this project will be documented in this file.
 - Pre-tokenized `Engine::complete_tokens` with owned token output, optional copied completion metadata, and explicit truncation reporting.
 - Thread-local, exclusive `TranscriptionEngine` and `EmbeddingEngine` owners with borrowed inputs and Rust-owned transcription and row-major embedding results.
 - Separate `VideoEngine` checkpoint-set ownership, blocking generation parameters/results, and standalone `VideoMuxParams`/`VideoMuxArgv` composition that never executes ffmpeg.
-- Model-free acceptance gates for docs, tests, ABI/layout/signature/exports, native fixtures, sanitizers, link modes, packages, downstream consumers, publish dry-run, and exact MSRV.
+- Model-free acceptance gates for docs, tests, ABI/layout/signature/exports, native fixtures, sanitizers, link modes, packages, downstream consumers, publish dry-run, and exact MSRV. Focused Rust and tooling regressions cover callback destruction, loopback Hub branch movement/cache identity, default native-gate status, mixed artifacts, missing filters, and filesystem-independent payload accounting. These gate definitions are not evidence of an exact-candidate pass.
 
 ### Compatibility
 
