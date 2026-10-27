@@ -262,12 +262,14 @@ fn run(args: Args) -> ChatResult<()> {
 
     write_stdout_line("Interactive chat: use /clear to reset the conversation or /quit to exit.")?;
     if let Some(prompt) = initial_prompt {
-        handle_turn(
-            &mut history,
-            prompt,
-            |history, prompt| run_turn(&engine, history, &config, !no_stream, prompt),
-            report_turn_error,
-        )?;
+        if let Err(error) = run_history_turn(&mut history, prompt, |history| {
+            generate_assistant(&engine, history, &config, !no_stream)
+        }) {
+            if error.is_fatal() {
+                return Err(error);
+            }
+            eprintln!("chat: {error}");
+        }
     }
     interactive_loop(&engine, &mut history, &config, !no_stream)
 }
@@ -330,51 +332,50 @@ fn interactive_loop(
             }
             Input::Empty => {}
             Input::Message(message) => {
-                handle_turn(
-                    history,
-                    message.to_owned(),
-                    |history, message| run_turn(engine, history, config, stream, message),
-                    report_turn_error,
-                )?;
+                if let Err(error) = run_history_turn(history, message.to_owned(), |history| {
+                    generate_assistant(engine, history, config, stream)
+                }) {
+                    if error.is_fatal() {
+                        return Err(error);
+                    }
+                    eprintln!("chat: {error}");
+                }
             }
         }
     }
 }
 
-fn run_turn(
+fn generate_assistant(
     engine: &Engine,
-    history: &mut Vec<Message>,
+    history: &[Message],
     config: &GenerationConfig,
     stream: bool,
-    user_message: String,
-) -> ChatResult<()> {
-    run_history_turn(history, user_message, |history| {
-        let request = build_request(history, config, stream)?;
-        if stream {
-            write_assistant_prefix()?;
-            let result = stream_assistant(engine, &request);
-            let content = result.as_ref().map_or("", |assistant| assistant.as_str());
-            finish_assistant_output(content)?;
-            result
-        } else {
-            engine
-                .chat_json(&request)
-                .map_err(|error| ChatError::turn(format!("blocking chat request failed: {error}")))
-                .and_then(|response| extract_blocking_content(&response))
-                .and_then(|assistant| {
-                    write_assistant_prefix()?;
-                    {
-                        let stdout = io::stdout();
-                        let mut stdout = stdout.lock();
-                        stdout.write_all(assistant.as_bytes()).map_err(|error| {
-                            ChatError::fatal(format!("failed to write assistant response: {error}"))
-                        })?;
-                    }
-                    finish_assistant_output(&assistant)?;
-                    Ok(assistant)
-                })
-        }
-    })
+) -> ChatResult<String> {
+    let request = build_request(history, config, stream)?;
+    if stream {
+        write_assistant_prefix()?;
+        let result = stream_assistant(engine, &request);
+        let content = result.as_ref().map_or("", |assistant| assistant.as_str());
+        finish_assistant_output(content)?;
+        result
+    } else {
+        engine
+            .chat_json(&request)
+            .map_err(|error| ChatError::turn(format!("blocking chat request failed: {error}")))
+            .and_then(|response| extract_blocking_content(&response))
+            .and_then(|assistant| {
+                write_assistant_prefix()?;
+                {
+                    let stdout = io::stdout();
+                    let mut stdout = stdout.lock();
+                    stdout.write_all(assistant.as_bytes()).map_err(|error| {
+                        ChatError::fatal(format!("failed to write assistant response: {error}"))
+                    })?;
+                }
+                finish_assistant_output(&assistant)?;
+                Ok(assistant)
+            })
+    }
 }
 
 fn run_history_turn<F>(
@@ -393,38 +394,10 @@ where
             Ok(())
         }
         Err(error) => {
-            rollback_turn(history, checkpoint);
+            history.truncate(checkpoint);
             Err(error)
         }
     }
-}
-
-fn handle_turn<F, R>(
-    history: &mut Vec<Message>,
-    user_message: String,
-    run: F,
-    mut report_error: R,
-) -> ChatResult<()>
-where
-    F: FnOnce(&mut Vec<Message>, String) -> ChatResult<()>,
-    R: FnMut(&ChatError),
-{
-    match run(history, user_message) {
-        Ok(()) => Ok(()),
-        Err(error) if error.is_fatal() => Err(error),
-        Err(error) => {
-            report_error(&error);
-            Ok(())
-        }
-    }
-}
-
-fn report_turn_error(error: &ChatError) {
-    eprintln!("chat: {error}");
-}
-
-fn rollback_turn(history: &mut Vec<Message>, checkpoint: usize) {
-    history.truncate(checkpoint);
 }
 
 fn stream_assistant(engine: &Engine, request: &str) -> ChatResult<String> {
@@ -834,39 +807,33 @@ mod tests {
 
     #[test]
     fn rolls_back_failed_turn_and_continues_with_the_next_input() {
-        let mut history = vec![Message::new(Role::System, "system")];
-        let mut errors = Vec::new();
-        let mut attempted_messages = Vec::new();
+        let system = Message::new(Role::System, "system");
+        let mut history = vec![system.clone()];
 
-        handle_turn(
-            &mut history,
-            "failed question".to_owned(),
-            |history, message| {
-                attempted_messages.push(message.clone());
-                run_history_turn(history, message, |_history| {
-                    Err(ChatError::turn("request failed"))
-                })
-            },
-            |error| errors.push(error.to_string()),
-        )
-        .unwrap();
-        assert_eq!(history, vec![Message::new(Role::System, "system")]);
-        assert_eq!(attempted_messages, ["failed question"]);
-        assert_eq!(errors, ["request failed"]);
+        let error = run_history_turn(&mut history, "failed question".to_owned(), |history| {
+            history.extend([
+                Message::new(Role::Assistant, "junk assistant entry"),
+                Message::new(Role::Assistant, "partial streamed response"),
+            ]);
+            Err(ChatError::turn("request failed"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "request failed");
+        assert!(!error.is_fatal());
+        assert_eq!(history, [system.clone()]);
 
-        handle_turn(
-            &mut history,
-            "next question".to_owned(),
-            |history, message| {
-                run_history_turn(history, message, |_history| Ok("answer".to_owned()))
-            },
-            |_| panic!("successful turn must not report an error"),
-        )
+        run_history_turn(&mut history, "next question".to_owned(), |history| {
+            assert_eq!(
+                history.as_slice(),
+                &[system.clone(), Message::new(Role::User, "next question")][..]
+            );
+            Ok("answer".to_owned())
+        })
         .unwrap();
         assert_eq!(
             history,
             vec![
-                Message::new(Role::System, "system"),
+                system,
                 Message::new(Role::User, "next question"),
                 Message::new(Role::Assistant, "answer"),
             ]
@@ -874,18 +841,17 @@ mod tests {
     }
 
     #[test]
-    fn propagates_fatal_errors_instead_of_recovering() {
-        let mut history = Vec::new();
-        let mut reported = false;
-        let error = handle_turn(
-            &mut history,
-            "question".to_owned(),
-            |_history, _message| Err(ChatError::fatal("standard output failed")),
-            |_| reported = true,
-        )
+    fn propagates_fatal_errors_after_rolling_back_the_turn() {
+        let system = Message::new(Role::System, "system");
+        let mut history = vec![system.clone()];
+        let error = run_history_turn(&mut history, "question".to_owned(), |history| {
+            history.push(Message::new(Role::Assistant, "partial output"));
+            Err(ChatError::fatal("standard output failed"))
+        })
         .unwrap_err();
+
         assert!(error.is_fatal());
-        assert!(!reported);
+        assert_eq!(history, [system]);
     }
 
     #[test]

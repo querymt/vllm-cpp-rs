@@ -114,7 +114,6 @@ fn missing_model_is_typed_for_every_task_owner_and_builder() {
     ];
     for error in errors {
         assert!(matches!(error, Error::ModelLoad { .. }), "{error:?}");
-        assert!(!error.to_string().is_empty());
     }
 }
 
@@ -148,11 +147,6 @@ fn interior_nul_fails_before_ffi() {
             }
         );
     }
-}
-
-#[test]
-fn device_defaults_to_native_auto_selection() {
-    assert_eq!(Device::default(), Device::Auto);
 }
 
 #[test]

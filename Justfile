@@ -61,7 +61,7 @@ header-check:
     "${CXX:-c++}" -std=c++20 -fsyntax-only -x c++ -I'{{ root }}/vllm-cpp-sys' \
       '{{ root }}/vllm-cpp-sys/wrapper.h'
 
-# Run focused tests for private build-script artifact selection helpers.
+# Run focused no-CMake tests; the workspace all-target test also covers this suite.
 build-support-test:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -72,7 +72,7 @@ build-support-test:
       -o "$temp/build-support-tests"
     "$temp/build-support-tests"
 
-# Test the pure Linux backend build planner without configuring CMake.
+# Run the pure planner tests without CMake; the workspace all-target test covers this suite.
 backend-config:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -92,8 +92,8 @@ backend-integrity:
 layout-test:
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-{{ root }}/target/layout-test}" cargo test --locked -p vllm-cpp-sys --release --test layout
 
-# Run generated-binding, header, layout, and backend configuration conformance checks.
-sys: bindings-check header-check build-support-test backend-config backend-integrity layout-test
+# Static sys checks; release layout is in the matrix or standalone `layout-test`.
+sys: bindings-check header-check backend-integrity
 
 # Test all Linux CPU link modes and the exact shared-library exports.
 link-modes:
@@ -721,7 +721,6 @@ native-capi:
     ctest --test-dir "$build" -N --tests-regex '^test_capi$' | tee "$listing"
     test_count=$(grep -Ec '^[[:space:]]*Test #[0-9]+: test_capi$' "$listing")
     [[ $test_count -eq 1 ]]
-    grep -Fxq 'Total Tests: 1' "$listing"
 
     env -u VT_ASYNC_SCHED -u VT_ASYNC_RUNNER \
       ctest --test-dir "$build" --output-on-failure --tests-regex '^test_capi$' \

@@ -1,34 +1,17 @@
 # Releasing
 
-Releases are manual. Review the candidate from a clean checkout before publishing;
-validation and dry-runs do not upload crates or create tags.
+Releases are manual. Validation and dry-runs do not upload crates or create tags; those actions are separate, explicit release steps.
 
 ## Prepare
 
-- Check `git status --short` and `git submodule status --recursive`, including a
-  clean native worktree. Confirm the gitlink, native HEAD, and peeled `v0.0.2` tag
-  all name `7020de93652ca920424a10ac5255b34810dd2f24`:
-
-  ```console
-  git rev-parse HEAD:vllm-cpp-sys/vllm.cpp
-  git -C vllm-cpp-sys/vllm.cpp rev-parse HEAD 'refs/tags/v0.0.2^{}'
-  ```
-
-- Confirm both Rust crates are `0.0.2`, with exactly `vllm-cpp-sys =0.0.2` in the
-  safe crate, and native CMake reports `0.0.2`. Check manifests and lockfiles.
-- Preserve ABI 17 and all 35 stable C functions: generated bindings, C11/C++20
-  headers, layouts, signatures, runtime ABI, linking, and dynamic exports must
-  agree. ABI-10 system libraries are incompatible.
-- Keep `Unreleased` empty above the dated changelog entry. Describe only tested
-  support: Linux x86_64 CPU is supported; accelerator backends remain experimental.
-- Review packaged licenses/notices and `vllm-cpp-sys/THIRD_PARTY.md`, including
-  imported license texts. Packages must not contain models, media fixtures, build
-  output, caches, SDKs, external CUTLASS trees, internal records, or local paths.
-  Cargo manifests define package inclusion and exclusion.
+- Start from a clean checkout and recursive submodule. Confirm the gitlink, native HEAD, and peeled `v0.0.2` tag all resolve to `7020de93652ca920424a10ac5255b34810dd2f24`.
+- Keep both Rust crates at `0.0.2`, `vllm-cpp` dependent on exactly `vllm-cpp-sys =0.0.2`, and native CMake at `0.0.2`.
+- Preserve ABI 17 and all 35 stable C functions across bindings, headers, layouts, signatures, runtime checks, linking, and dynamic exports. ABI-10 system libraries are incompatible.
+- Claim only tested support: native Linux x86_64 CPU is supported; accelerator backends remain experimental. Keep licenses/notices and Cargo's package boundaries accurate; packages must exclude models, fixtures, caches, build output, external CUTLASS, and local paths.
 
 ## Validate
 
-Use the normal Rust/native build tools and Just 1.40 or newer:
+Run the maintained gates with Just 1.40 or newer:
 
 ```console
 just ci
@@ -36,36 +19,17 @@ RUSTUP_TOOLCHAIN=1.85.0 just msrv
 git diff --check
 ```
 
-`just ci` runs formatting, warnings-denied lint/docs, model-free workspace tests,
-bindings/header/layout/signature/ABI/export
-checks, four workspace CPU link modes, native C API fixtures, ASan/UBSan/leak
-checks, package verification, and a no-upload publish dry-run. The MSRV gate
-separately requires Rust and Cargo exactly 1.85.0.
+`just ci` runs formatting, warnings-denied lint/docs, locked model-free workspace tests, binding/header/layout/ABI/symbol checks, backend integrity, four CPU link modes, native C API fixtures, ASan/UBSan/leak checks, package/downstream verification, and a publish dry-run. Workspace all-target tests include the build-support and backend-config suites. The separate MSRV gate requires Rust and Cargo exactly 1.85.0.
 
-Run the package gate with a fresh target directory (the CI package run may serve
-as this run). It compares archives with `cargo package --list`, checks metadata,
-source inputs, licenses and leaks, then runs offline extracted tests, four
-extracted sys link modes, and independent sys and safe downstream consumers.
-File counts, payload/compressed sizes and SHA-256 hashes are diagnostics, not
-caps. A second run is optional; claim byte reproducibility only if compared
-archive hashes actually match.
+`just package-test` compares each archive with `cargo package --list`, checks metadata, native inputs, licenses and leaks, then runs offline extracted tests, four extracted sys link modes, and independent sys and safe downstream consumers. File counts, payload/compressed sizes, and SHA-256 values are diagnostics, not caps. Claim byte reproducibility only when two archive hashes actually match.
 
-The native fixture gate unsets `VT_ASYNC_SCHED` and `VT_ASYNC_RUNNER`. A default
-failure remains a failure; alternate-scheduler diagnostics cannot satisfy it.
-Record any failed gate rather than treating later individual passes as a CI pass.
+The native fixture gate clears `VT_ASYNC_SCHED` and `VT_ASYNC_RUNNER` and validates the default-scheduler result.
 
-Nix is optional: use `nix develop --no-write-lock-file -c just ci` and
-`nix develop .#msrv --no-write-lock-file -c just msrv` instead if desired.
-Prepared-Qwen inference/sanitizers, native-only TSan, Rust MiniMax-H3 generation,
-Miri, other platforms, and accelerator runtime are optional or deferred lanes.
-Report only what actually ran; model-free passes do not establish model inference.
+Nix is optional. Prepared-Qwen inference/sanitizers, native-only TSan, Rust MiniMax-H3 generation, Miri, other platforms, and accelerator runtime are optional or deferred. Report only evidence actually collected: model-free passes and successful compilation do not establish prepared-model inference or backend correctness.
 
 ## Publish
 
-Check crates.io for the exact versions before uploading. An unavailable or
-ambiguous registry state needs diagnosis, not a trial upload. Publish sys first,
-wait for registry availability, then run the **full** safe dry-run against registry
-sys `0.0.2` before uploading the safe crate:
+`just publish-dry-run` runs only a workspace Cargo publish dry-run with `--no-verify` to avoid the registry dependency cycle; it does not verify packages, upload crates, or tag a release. `just ci` runs package verification separately through `just package-test`. This is not the full registry-resolved safe-crate dry-run. Publish sys first, wait until it is available, then fully verify the safe crate against registry sys `0.0.2` before its upload:
 
 ```console
 cargo publish -p vllm-cpp-sys --locked
@@ -73,14 +37,4 @@ cargo publish -p vllm-cpp --locked --dry-run
 cargo publish -p vllm-cpp --locked
 ```
 
-The pre-publication `just publish-dry-run` uses `--no-verify` to avoid the registry
-cycle; it does not replace that full safe dry-run. After publication, verify
-registry metadata, docs.rs, licenses, and a clean downstream build before tagging
-the published commit and creating a release.
-
-Accepted versions are immutable: never republish or replace them with different
-bytes. If sys succeeds but safe fails, check registry state before retrying;
-retry unchanged safe contents only for a transient failure, otherwise prepare a
-new coordinated version. Stop on identity drift, failed gates, dirty release
-state, or unexpected package content. Yanking does not erase a crate or make its
-version reusable and is not an ordinary abort mechanism.
+After explicit publication, verify registry metadata, docs.rs, licenses, and a clean downstream build before tagging the published commit. Published versions are immutable: never replace a version with different bytes, and do not retry once a version is accepted. If an upload result is unknown, unavailable, or ambiguous, diagnose registry state until acceptance is known. Retry only a transient failure confirmed absent from the registry, using the unchanged previously validated contents; otherwise prepare a new coordinated version. Yanking does not make a version reusable.
