@@ -35,6 +35,8 @@ let engine = Engine::load(path)?;
 
 GGUF mode retrieves one root-level lowercase `.gguf` file and rejects split sets. Safetensors mode first reads repository metadata for `main` or the explicit revision, pins downloads to its commit SHA, and retrieves only the root files required by this native loader: `config.json`, `tokenizer.json`, optional `tokenizer_config.json`, and either `model.safetensors` or the root index plus every indexed root shard. It returns the shared `snapshots/<sha>` directory and creates that revision's cache ref only after a complete successful retrieval. It does not download unrelated repository assets. Offline mode constructs no network API, reads the cached `main` ref by default, and distinguishes a missing cache revision from an incomplete cached snapshot.
 
+Both formats require a full commit SHA in online metadata and reject metadata or offline snapshots that differ from an explicit full-SHA request. Offline resolution still requires the requested revision's cache ref, even for a full SHA.
+
 Retrieval validates cache and snapshot completeness; it does not prove that the pinned native engine supports the repository's model architecture, tokenizer, quantization, or backend.
 
 In the repository checkout, `just setup-test-model` explicitly resolves `Qwen/Qwen3-0.6B` at immutable revision `c1899de289a04d12100db370d81485cdf75e47ca`, reusing the standard Hugging Face cache and honoring normal `HF_HOME` and authentication. Ordinary tests and instrumentation commands never resolve or download this fixture. `VLLM_CPP_TEST_MODEL` remains an external contract: when supplied, it must point to a prepared model directory; model tests skip when it is unset.

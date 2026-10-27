@@ -382,7 +382,7 @@ impl MarshaledSamplingParams {
 
         let mut logits_processor = None;
         if let Some(processor) = &params.logits_processor {
-            if params.max_tokens.is_none() || params.max_tokens == Some(0) {
+            if params.max_tokens.is_none() {
                 return Err(invalid_configuration(
                     "custom logits processors require bounded max_tokens because the native callback cannot abort generation",
                 ));

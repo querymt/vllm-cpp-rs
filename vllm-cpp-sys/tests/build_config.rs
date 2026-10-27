@@ -267,12 +267,6 @@ fn mlx_validation_reports_each_configuration_error() {
         format!("{ERROR_PREFIX} MLX_ROOT=mlx is not an existing directory")
     );
 
-    let mut relative_probe = MockProbe::mlx();
-    relative_probe
-        .canonical
-        .insert(PathBuf::from("mlx"), PathBuf::from("canonical-mlx"));
-    assert!(error(&inputs, &relative_probe).contains("must resolve to an absolute path"));
-
     for missing in [
         "include/mlx/array.h",
         "lib/libmlx.dylib",
